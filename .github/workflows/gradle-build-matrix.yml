@@ -46,15 +46,15 @@ jobs:
           password: ${{ secrets.ARTIFACTORY_TOKEN }}
       - name: Gradle Setup 🏗️
         id: gradle-setup
-        uses: mdsol/ctms-github-workflows/actions/gradle-setup@develop
+        uses: ./actions/gradle-setup@develop
         with:
           fetch-depth: 0
       - name: Gradle Info ℹ️
         id: gradle-info
-        uses: mdsol/ctms-github-workflows/actions/gradle-info@develop
+        uses: ./actions/gradle-info@develop
         with:
           working-directory: ${{ inputs.working-directory || '.' }}
-      - uses: mdsol/ctms-github-workflows/actions/gradle-test@develop
+      - uses: ./actions/gradle-test@develop
         id: gradle-test
         name: Build and Test 🎛️
         with:
