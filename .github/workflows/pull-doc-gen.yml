@@ -1,0 +1,24 @@
+name: Build & Test 💣
+
+on:
+  push:
+    paths:
+      - doc-gen-service/
+
+permissions:
+  contents: write
+  issues: read
+  checks: write
+  pull-requests: write
+  id-token: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-doc-gen-service
+  cancel-in-progress: true
+
+jobs:
+  doc-gen-service-ci:
+    uses: .github/workflows/gradle-build.yml@main
+    with:
+      working-directory: 'doc-gen-service'
+    secrets: inherit
