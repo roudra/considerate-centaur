@@ -1,0 +1,110 @@
+# Workflow to build, Test and Upload Coverage to Sonar
+# @author rouroy
+# @since 2023.09.22
+
+name: Test 🛠️
+
+inputs:
+  mauth-app-uuid:
+    description: APP UUID
+    required: true
+  mauth-private-key:
+    description: 'App Private key'
+    required: true
+  test-app-uuid:
+    description: Test UUID
+    required: true
+  test-private-key:
+    description: 'Test Private key'
+    required: true
+  artifactory-username:
+    description: 'Artifactory Username'
+    required: true
+  artifactory-token:
+    description: 'Artifactory Token'
+    required: true
+  artifactory-test-folder:
+    description: 'Artifactory Test Report Upload Folder'
+    required: false
+    default: site_monitoring-metadata-preprod-local/simon-api
+  sonar-token:
+    description: 'Sonar Token to access sonarqube server (Required). Use SONAR_TOKEN organizational secret'
+    required: true
+  working-directory:
+    description: 'Set working directory if not in project root dir. Composite actions runs in root instead of current working directory'
+    required: true
+  project-key:
+    description: 'Project key identifier. Default is com.mdsol:repository_name. Only pass a value if project is monorepo to identify projects (usually if written in different language)'
+    required: true
+
+runs:
+  using: composite
+  steps:
+
+    - name: Create env file for test 🌤️
+      shell: bash
+      run: |
+        mkdir -p $HOME/.config/jgit/
+        pwd
+        touch .env
+        echo MAUTH_APP_UUID=${{ inputs.mauth-app-uuid }}                      >> .env
+        printf "MAUTH_PRIVATE_KEY=%s\n" "${{ inputs.mauth-private-key }}"     >> .env
+        echo TEST_APP_UUID=${{ inputs.test-app-uuid }}                        >> .env
+        printf "TEST_PRIVATE_KEY=%s\n" "${{ inputs.test-private-key }}"       >> .env
+        cat .env
+      working-directory: ${{ inputs.working-directory }}
+        
+    - name: Execute Gradle Test 🔬
+      shell: bash
+      env:
+        OTEL_RESOURCE_ATTRIBUTES : service.name=ci/github-action/${{ github.event.repository.name }}
+      run: |
+        gradle \
+        build \
+        test
+      working-directory: ${{ inputs.working-directory }}
+
+    - name: Upload Test Report to Artifactory ⏫
+      shell: bash
+      continue-on-error: true
+      run: |
+        zip -r -j gradleTestReport.zip build/reports/tests/test/
+        ls -lrt
+        echo "Uploading files..."
+        curl -u "${{ inputs.artifactory-username }}:${{ inputs.artifactory-token }}" \
+        --header "X-Explode-Archive: false" \
+        -T "{gradleTestReport.zip}" \
+        "https://mdsol.jfrog.io/mdsol/${{ inputs.artifactory-test-folder}}/${{ github.sha }}/"
+      working-directory: ${{ inputs.working-directory }}
+
+    - name: Upload Karate Report to Artifactory ⏫
+      if: inputs.karate-report-upload == true
+      shell: bash
+      continue-on-error: true
+      run: |
+        zip -r -j karateTestReport.zip build/cucumber-html-reports/
+        ls -lrt
+        echo "Uploading files..."
+        curl -u "${{ inputs.artifactory-username }}:${{ inputs.artifactory-token }}" \
+        --header "X-Explode-Archive: false" \
+        -T "{karateTestReport.zip}" \
+        "https://mdsol.jfrog.io/mdsol/${{ inputs.artifactory-test-folder}}/${{ github.sha }}/"
+      working-directory: ${{ inputs.working-directory }}
+
+    - name: Publish Test Results on Github 📢
+      uses: EnricoMi/publish-unit-test-result-action@v2
+      if: always()
+      continue-on-error: true
+      with:
+        check_name: "Test Results (${{ github.event.workflow_run.event || github.event_name }})"
+        files: "${{ inputs.working-directory }}/build/test-results/test/*.xml"
+        job_summary: true
+
+    - name: Code Analysis 🔍
+      uses: mdsol/sonarqube/actions/scan-java@main
+      with:
+        sonar-token: ${{ inputs.sonar-token }}
+        verbose: true
+        build: 'gradle'
+        working-directory: ${{ inputs.working-directory }}
+        project-key : ${{ inputs.project-key }}

@@ -1,0 +1,29 @@
+# Workflow to build, Test and Upload Coverage to Sonar
+# @author rouroy
+# @since 2023.09.22
+
+name: Info 🛠️
+
+outputs:
+  code-tag:
+    description: Generate Code Tag
+    value: ${{ steps.read_build_info.outputs.codeTag }}
+inputs:
+  working-directory:
+    description: 'Set working directory if not in project root dir. Composite actions runs in root instead of current working directory'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Build Info
+      shell: bash
+      run: gradle buildInfo
+      working-directory: ${{ inputs.working-directory }}
+
+    # READ BUILD INFO
+    - name: Read Json
+      id: read_build_info
+      uses: zoexx/github-action-json-file-properties@1.0.6
+      with:
+        file_path: "${{ inputs.working-directory }}/src/main/resources/META-INF/resources/buildinfo.json"
