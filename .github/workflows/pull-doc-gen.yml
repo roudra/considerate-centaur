@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   doc-gen-service-ci:
-    uses: .github/workflows/gradle-build.yml@main
+    uses: ./.github/workflows/gradle-build.yml@main
     with:
       working-directory: 'doc-gen-service'
     secrets: inherit
