@@ -1,0 +1,189 @@
+import groovy.json.JsonBuilder
+
+plugins {
+    id 'java'
+    id 'io.quarkus'
+    id 'checkstyle'
+    id 'project-report'
+    id "org.sonarqube" version "4.4.1.3373"
+    id 'com.adarshr.test-logger' version '4.0.0'
+}
+
+repositories {
+    mavenCentral()
+    mavenLocal()
+    maven {
+        url = uri("https://mdsol.jfrog.io/artifactory/maven-prod-virtual")
+        credentials {
+            username = project.findProperty("artifactory_username")?.toString() ?: System.getenv("ARTIFACTORY_USERNAME")
+            password = project.findProperty("artifactory_password")?.toString() ?: System.getenv("ARTIFACTORY_PASSWORD")
+        }
+    }
+}
+
+group 'com.mdsol.simon'
+version '2024.0.1'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+compileJava {
+    options.encoding = 'UTF-8'
+    options.compilerArgs << '-parameters'
+}
+
+compileTestJava {
+    options.encoding = 'UTF-8'
+    options.compilerArgs << '-parameters'
+}
+
+ext {
+    quarkusPlatformVersion = '3.8.1'
+    commonCodec = '1.15'
+}
+
+
+dependencies {
+    implementation "commons-codec:commons-codec:${commonCodec}"
+    implementation enforcedPlatform("io.quarkus.platform:quarkus-bom:${quarkusPlatformVersion}")
+    implementation enforcedPlatform("io.quarkus.platform:quarkus-camel-bom:${quarkusPlatformVersion}")
+//    implementation 'org.apache.camel.quarkus:camel-quarkus-grpc'
+//    implementation 'org.apache.camel.quarkus:camel-quarkus-core'
+//    implementation 'org.apache.camel.quarkus:camel-quarkus-base64'
+//    implementation 'org.apache.camel.quarkus:camel-quarkus-mapstruct'
+//    implementation 'org.apache.camel.quarkus:camel-quarkus-quartz'
+//    implementation 'org.apache.camel.quarkus:camel-quarkus-jackson'
+//    implementation 'org.apache.camel.quarkus:camel-quarkus-mock'
+//    implementation 'org.apache.camel.quarkus:camel-quarkus-bean'
+//    implementation 'org.apache.camel.quarkus:camel-quarkus-debezium-postgres'
+//    implementation 'org.apache.camel.quarkus:camel-quarkus-rest-openapi'
+//    implementation 'org.apache.camel.quarkus:camel-quarkus-microprofile-fault-tolerance'
+//    implementation 'org.apache.camel.quarkus:camel-quarkus-opentelemetry'
+//    implementation 'org.apache.camel.quarkus:camel-quarkus-debezium-mongodb'
+//    implementation 'org.apache.camel.quarkus:camel-quarkus-log'
+//    implementation 'org.apache.camel.quarkus:camel-quarkus-openapi-java'
+    implementation 'org.apache.camel.quarkus:camel-quarkus-kafka'
+//    implementation 'org.apache.camel.quarkus:camel-quarkus-jackson-avro'
+//    implementation 'org.apache.camel.quarkus:camel-quarkus-bean-validator'
+    implementation 'org.apache.camel.quarkus:camel-quarkus-debezium-mysql'
+    implementation 'org.apache.camel.quarkus:camel-quarkus-mongodb'
+//    implementation 'org.apache.camel.quarkus:camel-quarkus-debug'
+//    implementation 'org.apache.camel.quarkus:camel-quarkus-graphql'
+//    implementation 'org.apache.camel.quarkus:camel-quarkus-micrometer'
+    implementation 'io.quarkus:quarkus-arc'
+    testImplementation 'io.quarkus:quarkus-junit5'
+    testImplementation 'io.quarkus:quarkus-jacoco'
+}
+
+test {
+    testlogger {
+        theme 'mocha-parallel'
+        showExceptions true
+        showStackTraces true
+        showFullStackTraces false
+        showCauses true
+        slowThreshold 2000
+        showSummary true
+        showSimpleNames true
+        showPassed true
+        showSkipped true
+        showFailed true
+        showOnlySlow false
+        showStandardStreams false
+        showPassedStandardStreams true
+        showSkippedStandardStreams true
+        showFailedStandardStreams true
+        logLevel 'lifecycle'
+    }
+    maxParallelForks = Runtime.runtime.availableProcessors().intdiv(2) ?: 1
+    systemProperty "java.util.logging.manager", "org.jboss.logmanager.LogManager"
+    systemProperty "quarkus.test.profile", "test"
+    systemProperty "js.ecmascript-version", "2021"
+    systemProperty "OTEL_RESOURCE_ATTRIBUTES", "service.name=simon/test/api"
+    systemProperty "karate.options", System.properties.getProperty("karate.options")
+    systemProperty "karate.env", System.properties.getProperty("karate.env")
+    outputs.upToDateWhen { false } //task should be run everytime
+    ignoreFailures false
+    jvmArgs "-Xmx2g", "-XX:+HeapDumpOnOutOfMemoryError"
+
+    String includeTagValues = System.getProperty("tags")
+    boolean tagSet = (includeTagValues != null)
+    if(tagSet){
+        useJUnitPlatform {
+            includeTags(includeTagValues)
+        }
+    } else {
+        useJUnitPlatform {}
+    }
+}
+checkstyle {
+    toolVersion = '10.12.1'
+    configFile file("doc/formatter/google_checks.xml")
+}
+checkstyleMain {
+    source = 'src/main/java'
+}
+checkstyleTest {
+    source = 'src/test/java'
+}
+tasks.withType(Checkstyle).configureEach {
+    reports {
+        xml.required = true
+        html.required = true
+        html.stylesheet resources.text.fromFile('../doc/formatter/checkstyle-simple.xsl')
+    }
+    minHeapSize = "200m"
+    maxHeapSize = "1g"
+    checkstyle {
+        enabled = false
+    }
+}
+tasks.register('buildInfo') {
+    group "build"
+    def finalFile = file('src/main/resources/META-INF/resources/buildinfo.json')
+    finalFile.getParentFile().mkdirs()
+    def revision = "git rev-parse --short HEAD".execute().text.trim()
+    def revisionFull = "git rev-parse HEAD".execute().text.trim()
+    def branchName = "git rev-parse --abbrev-ref HEAD".execute().text.trim()
+    def finalVersion = project.version
+    println branchName
+    switch (branchName) {
+        case 'develop':
+            finalVersion += "-beta_" + revision
+            break
+        case ~/^release\/.*$/:
+        case ~/^hotfix\/.*$/:
+            finalVersion += "-RC_" + revision
+            break
+        case ~/^feature\/.*$/:
+        case ~/^bugfix\/.*$/:
+            finalVersion += "-alpha_" + revision
+            break
+        default:
+            finalVersion += "-prealpha_" + revision
+            // Possibly checked out a commit id and not branch.
+            // throw new GradleException("Branch name doesn't match any pattern: $branchName")
+            break
+    }
+    doLast {
+        def data = [
+                project       : project.name,
+                shortCommitSha: revision,
+                commitSha     : revisionFull,
+                version       : project.version,
+                finalVersion  : finalVersion,
+                codeTag       : finalVersion + "_" + project.name,
+                buildDate     : new Date(),]
+        def json = new JsonBuilder(data).toPrettyString()
+        finalFile.write(json)
+        println "Created buildinfo.json with contents:\n$json"
+    }
+}
+
+sonar {
+    properties {
+        property "sonar.coverage.jacoco.xmlReportPaths", "build/jacoco-report/jacoco.xml"
+        property 'sonar.gradle.skipCompile', 'true'
+    }
+}
