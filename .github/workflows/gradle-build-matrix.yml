@@ -1,0 +1,70 @@
+# GitHub Reusable Workflow to build, Test and Upload Coverage to Sonar
+# @author rouroy
+# @since 2023.09.22
+name: Gradle Build & Test 🛠️
+run-name: Gradle Build & Test 🛠 triggered by @${{ github.actor }}
+
+on:
+  workflow_call:
+    inputs:
+      artifactory-test-folder:
+        description: 'Artifactory Test Report Upload Folder'
+        required: false
+        default: site_monitoring-metadata-preprod-local/simon-api
+        type: string
+      working-directory:
+        description: 'Set working directory if not in project root dir. Composite actions runs in root instead of current working directory'
+        type: string
+        required: false
+      project-key:
+        description: 'Project key identifier. Default is com.mdsol:repository_name. Only pass a value if project is monorepo to identify projects (usually if written in different language)'
+        type: string
+        required: false
+    outputs:
+      code-tag:
+        description: All Outputs of The Pipeline
+        value: ${{ jobs.test.outputs.code-tag }}
+
+env:
+  ARTIFACTORY_USERNAME: ${{ vars.ARTIFACTORY_USERNAME }}
+  ARTIFACTORY_PASSWORD: ${{ secrets.ARTIFACTORY_TOKEN }}
+
+jobs:
+  test:
+    name: Build & Test Gradle Project 🔬
+    runs-on:
+      - self-hosted
+      - ubuntu-latest
+    outputs:
+      code-tag: ${{ steps.gradle-info.outputs.code-tag}}
+    steps:
+      - name: Docker Setup 🐳
+        uses: docker/login-action@v3
+        with:
+          registry: 'mdsol-dockerhub-docker-remote.jfrog.io'
+          username: ${{ vars.ARTIFACTORY_USERNAME }}
+          password: ${{ secrets.ARTIFACTORY_TOKEN }}
+      - name: Gradle Setup 🏗️
+        id: gradle-setup
+        uses: mdsol/ctms-github-workflows/actions/gradle-setup@develop
+        with:
+          fetch-depth: 0
+      - name: Gradle Info ℹ️
+        id: gradle-info
+        uses: mdsol/ctms-github-workflows/actions/gradle-info@develop
+        with:
+          working-directory: ${{ inputs.working-directory || '.' }}
+      - uses: mdsol/ctms-github-workflows/actions/gradle-test@develop
+        id: gradle-test
+        name: Build and Test 🎛️
+        with:
+          mauth-app-uuid : ${{ secrets.SIMON_APP_UUID }}
+          mauth-private-key: ${{ secrets.SIMON_API_PRIVATE_KEY }}
+          test-private-key: ${{ secrets.TEST_PRIVATE_KEY }}
+          test-app-uuid: ${{ secrets.TEST_APP_UUID }}
+          artifactory-username: ${{ vars.ARTIFACTORY_USERNAME }}
+          artifactory-token: ${{ secrets.ARTIFACTORY_TOKEN }}
+          artifactory-test-folder: site_monitoring-metadata-preprod-local/simon-api
+          sonar-token: ${{ secrets.SONAR_TOKEN }}
+          working-directory: ${{ inputs.working-directory || '.' }}
+          project-key: ${{ inputs.project-key || format('com.mdsol:{0}',github.event.repository.name) }}
