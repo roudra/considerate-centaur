@@ -28,3 +28,9 @@ bin/
 ### Mac OS ###
 .DS_Store
 /.idea/
+/doc-gen-service/build/
+/doc-gen-service/bin/
+/doc-gen-service/.gradle/
+/sync-service/.gradle/
+/sync-service/bin/
+/sync-service/build/
