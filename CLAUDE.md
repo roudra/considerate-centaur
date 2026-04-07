@@ -26,7 +26,7 @@ This repository is an **adaptive educational companion** for children. Its purpo
 - Surface behavioral insights for parents so they understand *how* their child thinks, not just what they scored
 - Build a "bones and soul" platform: stable data schemas plus Claude's adaptive intelligence
 
-The existing `sync-service` (Kotlin/Quarkus) is the backend foundation. The app adds learner management, assignment generation, progress tracking, and a parent dashboard on top of it.
+The backend is built on **Kotlin/Quarkus**. The app provides learner management, assignment generation, progress tracking, and a parent dashboard.
 
 ### 2. What Claude Is Expected to Do
 
@@ -54,7 +54,7 @@ Claude does **not** store state, decide correctness (the backend does), or write
 ## Core Architecture
 
 ### Tech Stack
-- **Backend**: Kotlin/Gradle (existing sync-service as foundation)
+- **Backend**: Kotlin/Quarkus/Gradle
 - **AI Engine**: Claude API (Anthropic SDK) for assignment generation, evaluation, and adaptive learning
 - **Data Storage**: Structured JSON + session markdown files (no external database)
 - **Frontend**: Web dashboard (parent view + child-facing learning interface)
@@ -467,10 +467,6 @@ The parent is the final verification layer for edge cases. Over time, the review
 - **Multi-Learner Support**: switch between learner profiles — each child gets their own persona with fully independent observed behaviors, ZPD levels, and learning curves
 
 ## Development Guidelines
-
-### Commands
-- Build: `cd sync-service && ./gradlew build`
-- Test: `cd sync-service && ./gradlew test`
 
 ### Key Principles
 - Every learner is different — never hard-code learning paths; always adapt from observed behavioral data
