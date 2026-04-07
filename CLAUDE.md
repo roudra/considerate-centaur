@@ -218,6 +218,180 @@ Adaptation targets the **Zone of Proximal Development** — always working in th
 - **Frustration awareness** — if behavioral signals suggest frustration, pivot to encouragement and easier problems before returning to the challenge
 - Never make the child feel bad about wrong answers — frame them as learning opportunities
 
+### Reliability Architecture: Preventing Hallucination & Memory Lapses
+
+**Core principle: Claude is the creative engine, not the source of truth.** Data files are the memory, the backend validates correctness, templates constrain generation, and the dashboard surfaces uncertainty.
+
+#### 1. Structured Output, Not Freeform Generation
+
+All Claude responses must use structured JSON schemas, never freeform text that gets parsed:
+
+```json
+// Claude returns structured assignment objects
+{
+  "type": "sequence-puzzle",
+  "skill": "pattern-recognition",
+  "difficulty": 4,
+  "theme": "dinosaurs",
+  "prompt": "A T-Rex takes 2 steps, then 4, then 8. How many steps next?",
+  "correctAnswer": 16,
+  "acceptableAnswers": [16, "16", "sixteen"],
+  "hints": [
+    "Look at how the number changes each time...",
+    "Each time, the number doubles!",
+    "8 × 2 = ?"
+  ],
+  "explanation": "Each step count doubles the previous one: 2→4→8→16. This is called a geometric sequence!"
+}
+```
+
+The `correctAnswer` field is **verified programmatically by the backend** before the assignment is shown to the child.
+
+#### 2. Ground Every Prompt in Source-of-Truth Data
+
+Claude does not remember across API calls. Every call includes relevant context from data files:
+
+```
+Every Claude API call includes:
+├── profile.json         → who this child is, interests, observed behaviors
+├── progress.json        → current skill levels, ZPD, recent accuracy
+├── Last 2-3 session summaries → Behavioral Observations + Continuity Notes sections only
+│   (NOT full assignment logs — keep context focused)
+└── skill-tree.json      → valid skills, levels, badge definitions
+```
+
+**The data files are the memory.** Claude reads them fresh every time. This is why the session markdown format captures continuity notes — they are the retrieval layer for session-to-session coherence.
+
+#### 3. Separate Generation from Evaluation
+
+Never use the same Claude call to generate a problem and evaluate the child's answer:
+
+```
+Pipeline (each step is a separate concern):
+
+  GENERATE  →  Claude creates assignment (structured JSON)
+      ↓
+  VALIDATE  →  Backend verifies correctAnswer programmatically
+      ↓
+  PRESENT   →  Show assignment to child
+      ↓
+  CAPTURE   →  Record child's response + timing + behavioral signals
+      ↓
+  EVALUATE  →  Claude evaluates (given: problem, correct answer, child's response, behavioral context)
+      ↓
+  RECORD    →  Backend writes session markdown (source of truth, not Claude)
+```
+
+By giving Claude the correct answer during evaluation, it cannot hallucinate whether the child is right. Claude's job at that stage is tone and explanation, not correctness judgment.
+
+#### 4. Constrain Generation with Assignment Templates
+
+Templates bound what Claude can produce, reducing the hallucination surface:
+
+```json
+// assignment-templates/sequence-puzzle.json
+{
+  "type": "sequence-puzzle",
+  "constraints": {
+    "sequenceTypes": ["arithmetic", "geometric", "fibonacci-like"],
+    "maxTerms": 6,
+    "numberRange": [1, 100],
+    "operations": ["add", "multiply", "power"]
+  },
+  "verifiable": true,
+  "verificationMethod": "compute-sequence"
+}
+```
+
+```json
+// assignment-templates/deductive-reasoning.json
+{
+  "type": "deductive-reasoning",
+  "constraints": {
+    "maxPremises": 3,
+    "logicTypes": ["if-then", "elimination", "syllogism"],
+    "domainVocabulary": "age-appropriate"
+  },
+  "verifiable": "partial",
+  "verificationMethod": "rule-check"
+}
+```
+
+Claude fills in templates creatively (theming, wording). The backend verifies the underlying logic is sound.
+
+#### 5. Verification Layers by Assignment Type
+
+Not all assignments are equally hallucination-prone. Verify accordingly:
+
+| Assignment Type | Risk Level | Verification Method |
+|---|---|---|
+| Arithmetic / sequences | Low | Backend computes answer independently |
+| Pattern matching | Low | Predefined pattern banks; Claude selects and themes |
+| If-then / elimination | Medium | Encode rules as constraints; verify conclusion follows from premises |
+| Spatial reasoning | Medium | Use validated visual templates; Claude describes, doesn't create images |
+| Free-form reasoning | High | Claude evaluates, backend flags low-confidence for parent review |
+| Creative / open-ended | High | No single correct answer; evaluate for effort and reasoning, not correctness |
+
+**Weight assignment mix toward verifiable types**, especially for new learners. Introduce higher-risk types gradually as the parent builds trust in the system.
+
+#### 6. Session Context Window Management
+
+Tiered context strategy to keep Claude focused and reduce noise:
+
+```
+ALWAYS include (compact):
+  └── profile.json
+  └── progress.json (current skill snapshot)
+
+INCLUDE SUMMARIZED (from last 2-3 sessions):
+  └── Session Summary section
+  └── Behavioral Observations section
+  └── Continuity Notes section
+  (NOT full assignment-by-assignment logs)
+
+INCLUDE FULL (current session only):
+  └── All assignments so far in this session
+  └── Child's responses and behavioral signals
+```
+
+This prevents context dilution — Claude sees what matters, not everything that ever happened.
+
+#### 7. Feedback Guardrails
+
+Enforce at the prompt level for every evaluation call:
+
+```
+Feedback rules (non-negotiable):
+- NEVER say "correct" unless the backend has confirmed correctness
+- NEVER invent facts — only explain using concepts present in the assignment
+- If uncertain about an evaluation, respond with curiosity:
+  "That's an interesting approach! Let's look at it together..."
+  and flag for parent review
+- NEVER use discouraging language
+- NEVER compare the child to other learners
+- Frame all wrong answers as learning: "Not quite — but you're thinking
+  in the right direction! Here's a hint..."
+```
+
+#### 8. Parent Review Queue
+
+For cases that can't be fully verified programmatically, surface on the dashboard:
+
+```
+Flagged for Review:
+┌─────────────────────────────────────────────────────────┐
+│ Session 2026-04-07, Assignment 4                        │
+│ Type: free-form reasoning                               │
+│ Claude's evaluation confidence: medium                  │
+│ Child's answer: "Because the big one eats the small one"│
+│ Claude's assessment: "Creative reasoning, partially     │
+│   correct — understood the elimination concept"         │
+│ Actions: [✓ Confirm] [✏ Override] [💬 Discuss]          │
+└─────────────────────────────────────────────────────────┘
+```
+
+The parent is the final verification layer for edge cases. Over time, the review queue shrinks as the system learns which types of evaluations the parent consistently confirms.
+
 ## Parent Dashboard
 
 ### Views
