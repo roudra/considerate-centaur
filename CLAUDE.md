@@ -71,7 +71,7 @@ Claude does **not** store state, decide correctness (the backend does), or write
   /data
     /learners         # Per-learner directories
       /<learner-id>
-        profile.json          # First name, age, interests, initial preferences, observed behavior
+        profile.json          # Display name, age, interests, initial preferences, observed behavior
         progress.json         # Cumulative skill scores and badge inventory
         /sessions
           session-YYYY-MM-DD-HHmm.md  # Session logs (human-readable)
@@ -95,7 +95,7 @@ The profile avoids static "learning style" labels (the VARK model is not support
 {
   "schemaVersion": 1,
   "id": "learner-uuid",
-  "name": "FirstName",
+  "name": "DisplayName",
   "age": 8,
   "interests": ["dinosaurs", "space", "building"],
   "initialPreferences": {
@@ -116,7 +116,7 @@ The profile avoids static "learning style" labels (the VARK model is not support
 
 **Field notes:**
 - `schemaVersion` — increment when the schema changes; used for safe migration of existing files.
-- `name` — **first name only**. The backend must never store or send a full name; see the Privacy rule in Development Guidelines.
+- `name` — **display name chosen by the user**. The system never asks for or stores the learner's real name. Users may provide any name or alias they like. This display name is safe to include in Claude API calls as-is — it is not a real identifier.
 - `initialPreferences.challengePreference` — valid values: `independent` | `guided` | `collaborative` (parent-set starting point).
 - `observedBehavior.frustrationResponse` — valid values: `unknown` | `perseveres` | `slows-down` | `rushes` | `disengages` (learned from sessions, never set by questionnaire).
 - `observedBehavior.effortAttribution` — valid values: `unknown` | `process-oriented` | `outcome-oriented`.
@@ -477,4 +477,4 @@ The parent is the final verification layer for edge cases. Over time, the review
 - Parent dashboard shows insights (behavioral trends, ZPD growth), not raw AI output
 - **Growth mindset in all feedback** — praise process, not talent
 - All Claude interactions must go through a central service layer for consistency and cost control
-- Learner data is private — the backend must strip the full learner name to first name only before including `profile.json` in any Claude API call. Never send a full name, surname, UUID, or any other identifiable field beyond the first name.
+- Learner data is private — the system never collects or stores real names. The `name` field is always a user-chosen display name (any alias is accepted). The backend must omit `id`, `learnerId`, UUIDs, and any other system-internal identifiers from every Claude API call; only the display name and non-identifying personalization fields are passed.
