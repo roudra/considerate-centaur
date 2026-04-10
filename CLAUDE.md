@@ -461,14 +461,20 @@ Pipeline (each step is a separate concern):
       ↓
   VALIDATE  →  Backend verifies correctAnswer programmatically
       ↓
-  PRESENT   →  Show assignment to child
+  STORE     →  Backend stores the verified assignment server-side (keyed by UUID)
       ↓
-  CAPTURE   →  Record child's response + timing + behavioral signals
+  PRESENT   →  Return to client: assignment ID + prompt/hints (NO correct answer)
+      ↓
+  CAPTURE   →  Client sends back: assignment ID + child's response
+      ↓
+  LOOKUP    →  Backend retrieves stored assignment by ID (client never supplies correctAnswer)
       ↓
   EVALUATE  →  Claude evaluates (given: problem, correct answer, child's response, behavioral context)
       ↓
   RECORD    →  Backend writes session markdown (source of truth, not Claude)
 ```
+
+**Trust boundary:** The client is untrusted. It never receives or sends back the `correctAnswer`. The generate endpoint returns only the assignment ID, prompt, hints, and difficulty. The evaluate endpoint accepts only the assignment ID and the child's response — the backend looks up the stored verified assignment to determine correctness. This prevents any client-side forgery of answers.
 
 By giving Claude the correct answer during evaluation, it cannot hallucinate whether the child is right. Claude's job at that stage is tone and explanation, not correctness judgment.
 

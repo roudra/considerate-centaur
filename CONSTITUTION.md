@@ -49,6 +49,7 @@ Claude generates, adapts, and encourages. It does not decide, store, or verify.
 - **The backend verifies correctness.** Claude's `correctAnswer` is checked programmatically before showing to the child. Claude can be wrong — the backend catches it.
 - **The backend writes session files.** Claude provides narrative content as structured output. The backend assembles and persists the markdown. The file on disk is the source of truth.
 - **Generation and evaluation are always separate.** Never use the same Claude call to create a problem and judge the child's answer.
+- **The client is untrusted.** The correct answer is never sent to or accepted from the client. Verified assignments are stored server-side; the client receives only an assignment ID. Evaluation looks up the stored answer by ID.
 - **Structured output only.** All Claude responses are parsed into typed structs — never freeform text.
 
 ## 6. Privacy by Architecture
