@@ -142,7 +142,7 @@ pub struct SessionHistoryItem {
 /// Non-negotiable feedback guardrails embedded in every evaluation prompt.
 ///
 /// See CLAUDE.md → "Feedback Guardrails".
-pub const FEEDBACK_GUARDRAILS: &str = r#"FEEDBACK RULES — NON-NEGOTIABLE:
+pub const FEEDBACK_GUARDRAILS: &str = r#"FEEDBACK RULES - NON-NEGOTIABLE:
 - NEVER say "correct" or "incorrect" as a standalone judgment — always phrase feedback as encouragement or guidance
 - NEVER invent facts — only explain using concepts present in the assignment
 - NEVER use discouraging language (no "Wrong", "No", "Bad answer", etc.)
@@ -449,7 +449,7 @@ mod tests {
         let prompt = evaluation_system_prompt();
         // The guardrails must be present in every evaluation system prompt.
         assert!(
-            prompt.contains("FEEDBACK RULES — NON-NEGOTIABLE"),
+            prompt.contains("FEEDBACK RULES - NON-NEGOTIABLE"),
             "guardrails header must be present"
         );
         assert!(

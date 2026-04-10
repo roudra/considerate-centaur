@@ -272,7 +272,7 @@ fn test_evaluation_prompt_contains_guardrails() {
     let system_prompt = claude::prompts::evaluation_system_prompt();
 
     assert!(
-        system_prompt.contains("FEEDBACK RULES — NON-NEGOTIABLE"),
+        system_prompt.contains("FEEDBACK RULES - NON-NEGOTIABLE"),
         "guardrails header must be present in every evaluation prompt"
     );
     assert!(
