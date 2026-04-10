@@ -29,7 +29,7 @@
 - [x] Remove unrelated sync-service code (old MySQL-to-MongoDB Java service)
 
 ## Next Steps
-- [ ] Initialize Rust project structure (`cargo init`)
+- [x] Initialize Rust project structure (`cargo init`)
 - [ ] Implement learner profile management
 - [ ] Implement Claude API integration layer
 - [ ] Build assignment generation pipeline
