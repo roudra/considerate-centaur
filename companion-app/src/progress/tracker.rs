@@ -182,6 +182,25 @@ pub struct LearnerProgress {
     pub challenge_flags: HashMap<String, bool>,
 }
 
+impl LearnerProgress {
+    /// Create a minimal default progress record for a learner that has no
+    /// existing `progress.json` (e.g. a brand-new learner).
+    pub fn default_for(learner_id: Uuid) -> Self {
+        Self {
+            schema_version: 1,
+            learner_id,
+            skills: HashMap::new(),
+            badges: Vec::new(),
+            streaks: Streaks::default(),
+            total_sessions: 0,
+            total_time_minutes: 0,
+            total_assignments: 0,
+            metacognition: Metacognition::default(),
+            challenge_flags: HashMap::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,11 +302,11 @@ mod tests {
     fn test_ring_buffer_evicts_oldest() {
         let mut skill = SkillProgress::default();
         // Push 6 entries: first entry (1) should be evicted.
-        skill.record_accuracy(true);  // index 0 → will be evicted
+        skill.record_accuracy(true); // index 0 → will be evicted
         skill.record_accuracy(false); // index 1
-        skill.record_accuracy(true);  // index 2
+        skill.record_accuracy(true); // index 2
         skill.record_accuracy(false); // index 3
-        skill.record_accuracy(true);  // index 4
+        skill.record_accuracy(true); // index 4
         skill.record_accuracy(false); // index 5 → pushes out index 0
 
         assert_eq!(skill.recent_accuracy.len(), RECENT_ACCURACY_MAX);

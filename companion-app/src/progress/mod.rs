@@ -1,14 +1,14 @@
 // Progress tracking — skill levels, XP, badges, spaced repetition.
 // See CLAUDE.md "Progress Tracking" and "Spaced Repetition" sections.
 
-pub mod tracker;
 pub mod spaced;
+pub mod tracker;
 
-pub use tracker::*;
 pub use spaced::{
     build_skill_health_map, classify_skill_health, plan_session_mix, update_spaced_repetition,
     ReviewCandidate, SkillHealth, SkillHealthEntry, MIN_EASE_FACTOR,
 };
+pub use tracker::*;
 
 use std::path::Path;
 use thiserror::Error;
@@ -176,11 +176,7 @@ impl SkillTreeBadges {
 ///   `totalSessions`, `totalAssignments`, `streakDays`, `anySkillLevel`, `sessionAccuracy`
 /// - `firstAttempt:<skill-id>` — true if the skill exists in `progress.skills`
 /// - bare identifier (e.g. `onboardingComplete`) — looks up `challenge_flags`
-fn evaluate_condition(
-    condition: &str,
-    progress: &LearnerProgress,
-    ctx: &BadgeContext,
-) -> bool {
+fn evaluate_condition(condition: &str, progress: &LearnerProgress, ctx: &BadgeContext) -> bool {
     // "firstAttempt:<skill-id>"
     if let Some(skill_id) = condition.strip_prefix("firstAttempt:") {
         return progress.skills.contains_key(skill_id);
@@ -202,12 +198,7 @@ fn evaluate_condition(
         "totalSessions" => progress.total_sessions as f64,
         "totalAssignments" => progress.total_assignments as f64,
         "streakDays" => progress.streaks.current_days as f64,
-        "anySkillLevel" => progress
-            .skills
-            .values()
-            .map(|s| s.level)
-            .max()
-            .unwrap_or(0) as f64,
+        "anySkillLevel" => progress.skills.values().map(|s| s.level).max().unwrap_or(0) as f64,
         "sessionAccuracy" => ctx.session_accuracy.unwrap_or(0.0) as f64,
         _ => return false,
     };

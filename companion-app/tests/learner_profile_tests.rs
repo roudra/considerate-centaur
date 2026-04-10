@@ -1,7 +1,7 @@
 /// Integration tests for learner profile file persistence (create, read, update, delete, list).
 use educational_companion::learner::{
-    self, AttentionPattern, ChallengePreference, EffortAttribution, FrustrationResponse,
-    HintUsage, InitialPreferences, LearnerProfile, ObservedBehavior,
+    self, AttentionPattern, ChallengePreference, EffortAttribution, FrustrationResponse, HintUsage,
+    InitialPreferences, LearnerProfile, ObservedBehavior,
 };
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -67,19 +67,23 @@ async fn test_read_wrong_schema_version_returns_error() {
     profile.schema_version = 99;
 
     // Write the profile with wrong schema version directly to disk.
-    let dir = tmp
-        .path()
-        .join("learners")
-        .join(profile.id.to_string());
-    tokio::fs::create_dir_all(dir.join("sessions")).await.unwrap();
+    let dir = tmp.path().join("learners").join(profile.id.to_string());
+    tokio::fs::create_dir_all(dir.join("sessions"))
+        .await
+        .unwrap();
     let json = serde_json::to_string_pretty(&profile).unwrap();
-    tokio::fs::write(dir.join("profile.json"), json).await.unwrap();
+    tokio::fs::write(dir.join("profile.json"), json)
+        .await
+        .unwrap();
 
     let result = learner::read_profile(tmp.path(), profile.id).await;
     assert!(
         matches!(
             result,
-            Err(learner::LearnerError::InvalidSchemaVersion { expected: 1, actual: 99 })
+            Err(learner::LearnerError::InvalidSchemaVersion {
+                expected: 1,
+                actual: 99
+            })
         ),
         "expected InvalidSchemaVersion, got: {:?}",
         result
@@ -120,7 +124,9 @@ async fn test_delete_profile() {
     let profile = make_profile();
     learner::create_profile(tmp.path(), &profile).await.unwrap();
 
-    learner::delete_profile(tmp.path(), profile.id).await.unwrap();
+    learner::delete_profile(tmp.path(), profile.id)
+        .await
+        .unwrap();
 
     let result = learner::read_profile(tmp.path(), profile.id).await;
     assert!(
@@ -180,9 +186,13 @@ async fn test_list_profiles_skips_bad_schema_version() {
     let mut bad = make_profile();
     bad.schema_version = 99;
     let dir = tmp.path().join("learners").join(bad.id.to_string());
-    tokio::fs::create_dir_all(dir.join("sessions")).await.unwrap();
+    tokio::fs::create_dir_all(dir.join("sessions"))
+        .await
+        .unwrap();
     let json = serde_json::to_string_pretty(&bad).unwrap();
-    tokio::fs::write(dir.join("profile.json"), json).await.unwrap();
+    tokio::fs::write(dir.join("profile.json"), json)
+        .await
+        .unwrap();
 
     let profiles = learner::list_profiles(tmp.path()).await.unwrap();
     assert_eq!(profiles.len(), 1, "bad schema version should be skipped");
@@ -213,7 +223,10 @@ async fn test_observed_behavior_preserved_across_update() {
         FrustrationResponse::Perseveres
     );
     assert_eq!(
-        read_back.observed_behavior.attention_pattern.optimal_session_minutes,
+        read_back
+            .observed_behavior
+            .attention_pattern
+            .optimal_session_minutes,
         Some(20)
     );
 }

@@ -1,0 +1,10 @@
+{
+  "type": "deductive-reasoning",
+  "constraints": {
+    "maxPremises": 3,
+    "logicTypes": ["if-then", "elimination", "syllogism"],
+    "domainVocabulary": "age-appropriate"
+  },
+  "verificationLevel": "partial",
+  "verificationMethod": "rule-check"
+}

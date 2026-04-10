@@ -111,8 +111,7 @@ impl ClaudeClient {
     ///
     /// Returns [`ClaudeError::MissingApiKey`] if the variable is not set.
     pub fn from_env() -> Result<Self, ClaudeError> {
-        let api_key = std::env::var("ANTHROPIC_API_KEY")
-            .map_err(|_| ClaudeError::MissingApiKey)?;
+        let api_key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| ClaudeError::MissingApiKey)?;
         Ok(Self::new(api_key, DEFAULT_MODEL.to_string()))
     }
 

@@ -51,6 +51,13 @@ pub struct GeneratedAssignment {
     /// Optional interaction modality. Defaults to text-based if absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub modality: Option<AssignmentModality>,
+    /// Structured verification data for backend answer checking.
+    ///
+    /// For `sequence-puzzle`: `{"terms": [2, 4, 8], "sequenceType": "geometric"}`
+    /// For `deductive-reasoning`: `{"premises": ["If A then B", "A is true"], "conclusion": "B"}`
+    /// For `pattern-matching`: omitted — `acceptableAnswers` is used directly.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification_data: Option<serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -155,14 +162,22 @@ mod tests {
             theme: "dinosaurs".to_string(),
             prompt: "A T-Rex takes 2 steps, then 4, then 8. How many steps next?".to_string(),
             correct_answer: serde_json::json!(16),
-            acceptable_answers: vec![serde_json::json!(16), serde_json::json!("16"), serde_json::json!("sixteen")],
+            acceptable_answers: vec![
+                serde_json::json!(16),
+                serde_json::json!("16"),
+                serde_json::json!("sixteen"),
+            ],
             hints: vec![
                 "Look at how the number changes each time...".to_string(),
                 "Each time, the number doubles!".to_string(),
                 "8 × 2 = ?".to_string(),
             ],
-            explanation: "Each step count doubles: 2→4→8→16. This is a geometric sequence!".to_string(),
+            explanation: "Each step count doubles: 2→4→8→16. This is a geometric sequence!"
+                .to_string(),
             modality: None,
+            verification_data: Some(
+                serde_json::json!({"terms": [2, 4, 8], "sequenceType": "geometric"}),
+            ),
         };
         let json = serde_json::to_string(&a).expect("serialize");
         let restored: GeneratedAssignment = serde_json::from_str(&json).expect("deserialize");
@@ -179,9 +194,14 @@ mod tests {
             prompt: "What comes next?".to_string(),
             correct_answer: serde_json::json!(32),
             acceptable_answers: vec![],
-            hints: vec!["hint1".to_string(), "hint2".to_string(), "hint3".to_string()],
+            hints: vec![
+                "hint1".to_string(),
+                "hint2".to_string(),
+                "hint3".to_string(),
+            ],
             explanation: "explanation".to_string(),
             modality: Some(AssignmentModality::VisualInteractive),
+            verification_data: None,
         };
         let json = serde_json::to_string(&a).expect("serialize");
         assert!(json.contains("\"assignmentType\""));
