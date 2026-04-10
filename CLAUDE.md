@@ -587,6 +587,195 @@ The parent is the final verification layer for edge cases. Over time, the review
 - **Session History**: browse past session markdowns with behavioral observations and continuity notes
 - **Learner Settings**: adjust profile, interests, session length, challenge preferences
 - **Multi-Learner Support**: switch between learner profiles — each child gets their own persona with fully independent observed behaviors, ZPD levels, and learning curves
+- **Skill Health Map**: spaced repetition status per skill — fresh, due, overdue, rusty — so parents can see which skills need review
+
+### Parent-Child Shared Sessions
+
+The dashboard isn't just for observation — parents can actively participate in learning.
+
+#### Shared Session Mode
+- Parent activates "Join Session" from the dashboard
+- The system presents a **co-solve challenge** — a harder problem designed for two people to work through together
+- Both parent and child see the problem; the child leads the solving, the parent provides support
+- The system observes the collaborative dynamic and records it in the session markdown:
+  - Did the parent take over, or did the child lead?
+  - Did the child ask for help proactively, or only after struggling?
+  - How did the child respond to the parent's hints vs. the system's hints?
+
+#### Why This Matters
+- Directly supports the `collaborative` challenge preference
+- Gives parents firsthand insight into how their child thinks (not just dashboard data)
+- Creates a shared positive experience around learning
+- The system can calibrate its own scaffolding by observing how a skilled human (the parent) scaffolds
+
+#### Session Markdown Addition
+```markdown
+## Shared Session: Parent Co-Solve
+- **Mode**: collaborative
+- **Parent role observed**: guide (let child lead, asked questions rather than giving answers)
+- **Child response to parent scaffolding**: positive — built on parent's hints, arrived at answer independently
+- **Comparison to system scaffolding**: child more willing to take risks with parent present
+```
+
+## Offline & Resilience Architecture
+
+The child should never stare at a loading screen. If Claude API is down or slow, learning continues.
+
+### Assignment Buffer
+
+The backend maintains a pre-generated buffer of assignments per learner:
+
+```json
+{
+  "learnerId": "learner-uuid",
+  "generatedAt": "2026-04-07T15:00:00Z",
+  "bufferSize": 10,
+  "assignments": [
+    {
+      "type": "sequence-puzzle",
+      "skill": "pattern-recognition",
+      "difficulty": 4,
+      "theme": "dinosaurs",
+      "prompt": "...",
+      "correctAnswer": 16,
+      "hints": ["...", "...", "..."],
+      "explanation": "..."
+    }
+  ]
+}
+```
+
+### Buffer Strategy
+- After each session, the backend requests Claude to generate the **next session's worth of assignments** (5-8 problems) and stores them in the buffer
+- Buffer covers a mix of skills based on the spaced repetition schedule and ZPD targets
+- Buffer assignments are pre-validated by the backend (correctAnswer verified)
+- When a session starts, the system tries Claude first for fresh, contextual assignments; falls back to buffer if Claude is unavailable
+
+### Graceful Degradation Tiers
+
+| Tier | Condition | Behavior |
+|---|---|---|
+| **Full** | Claude API responsive | Fresh assignments, real-time evaluation, behavioral feedback |
+| **Buffered** | Claude API slow (>5s) or down | Serve from pre-generated buffer; defer evaluation to when API returns |
+| **Template** | Buffer empty + Claude down | Generate from assignment templates using deterministic rules (no Claude); basic right/wrong feedback only |
+| **Offline Practice** | No connectivity at all | Template-generated assignments; all session data queued for sync when connectivity returns |
+
+### Data Sync on Reconnect
+- Session data recorded during offline/buffered mode is stored locally
+- When connectivity returns, the backend syncs session data and requests Claude to generate behavioral observations retroactively
+- The parent dashboard marks offline sessions with a note: "Session completed offline — behavioral observations generated after sync"
+
+## Privacy & Safety Architecture
+
+### Core Privacy Principles
+
+1. **No real names** — the system never asks for or stores a child's real name. The `name` field is a child-chosen display name (alias, character name, anything)
+2. **Local-first storage** — all learner data lives on the local filesystem. No cloud database, no third-party analytics
+3. **Minimal data to Claude** — only what's needed for assignment generation and evaluation crosses the API boundary
+
+### Data Flow: What Goes Where
+
+```
+LOCAL STORAGE (never leaves the device):
+├── profile.json      → includes id, age, interests, observed behavior
+├── progress.json     → skill levels, ZPD, badges, metacognition, spaced repetition
+├── session markdowns  → full session logs with behavioral observations
+└── buffer.json       → pre-generated assignments
+
+SENT TO CLAUDE API (sanitized):
+├── display name only  → "StarExplorer42" (child-chosen, not real name)
+├── age               → needed for age-appropriate language calibration
+├── interests         → needed for theming assignments
+├── skill levels + ZPD → needed for difficulty calibration
+├── recent session summaries → behavioral observations + continuity notes only
+└── current session context → assignments and responses so far
+
+NEVER SENT TO CLAUDE:
+├── id / learnerId / UUIDs
+├── any parent information
+├── raw session logs (only summaries)
+└── system-internal metadata
+```
+
+### COPPA Considerations
+- The system is designed for use by a parent with their child — the parent is the account holder and data controller
+- No data is transmitted to third parties beyond the Claude API calls (which contain only the sanitized fields above)
+- No advertising, no tracking pixels, no analytics SDKs
+- Parent can export all data (JSON + markdown files) at any time
+- Parent can delete all learner data with a single action — deletes the `<learner-id>/` directory entirely
+- Session data retention is controlled by the parent — no automatic cloud backups
+
+### Content Safety
+- All Claude-generated content passes through the feedback guardrails (see Reliability Architecture)
+- Assignment content is constrained by templates — Claude cannot introduce arbitrary topics
+- The parent review queue catches any edge cases in evaluation
+- No user-generated content is shared between learners or exposed externally
+
+## Deeper Gamification
+
+Badges and streaks provide basic motivation. Deeper gamification creates a sense of **journey, mastery, and agency**.
+
+### Skill Tree Visualization
+
+The child sees their skills as a visual **unlock tree** — not a flat list:
+
+```
+                    [Critical Thinking]
+                    /                 \
+        [Deductive Reasoning]    [Problem Decomposition]
+              |                        |
+      [Sequential Logic]        [Spatial Reasoning]
+              \                  /
+           [Pattern Recognition]
+                  (start here)
+```
+
+- Skills at the bottom are foundational; skills higher up require prerequisites
+- Each skill node shows: current level, XP progress bar, badges earned
+- Locked skills are visible but grayed out — the child can see what's coming and what they need to unlock it
+- Unlocking a new skill is a major event with celebration animation
+
+### Challenge Modes
+
+Beyond regular sessions, special challenge modes add variety:
+
+#### Timed Challenges
+- "Speed Round" — 5 problems, 60 seconds each, at the child's independent level
+- Focus on fluency and confidence, not pushing difficulty
+- Earn a unique "Lightning" badge for completing with 80%+ accuracy
+
+#### Boss Battles
+- A multi-step, multi-skill problem that combines 2-3 skill areas
+- Example: "The Dinosaur Maze" — uses spatial reasoning to navigate, sequential logic to follow clues, pattern recognition to decode a message
+- Only appears when the child has sufficient levels in all required skills
+- Earns a special "Boss Defeated" badge with the challenge name
+
+#### Daily Puzzle
+- One optional puzzle per day, outside of regular sessions
+- Rotates across skill areas
+- Maintains a separate streak counter ("Daily Puzzle Streak")
+- Low pressure — no impact on skill levels, just XP and badges
+
+### Teach-Back Moments
+
+The deepest form of learning is explaining a concept to someone else. The system periodically asks the child to teach back:
+
+- After mastering a concept (3+ consecutive correct at a level), the system says: "You're really good at this! Can you explain how you figured it out? Pretend you're teaching a friend."
+- The child responds via text or voice input
+- Claude evaluates the explanation for:
+  - **Accuracy** — did they describe the actual concept correctly?
+  - **Completeness** — did they cover the key steps?
+  - **Clarity** — would a peer understand this?
+- Successful teach-backs earn a unique "Teacher" badge per skill
+- The explanation is recorded in the session markdown as a metacognition signal
+- This data feeds into `metacognition.trend` — children who can teach back are demonstrating deep understanding
+
+### Progression Feel
+
+- **XP notifications** are shown after each assignment ("Pattern Recognition +20 XP!")
+- **Level-up celebrations** are prominent — full-screen animation, badge award
+- **Streak protection** — if the child misses one day, they get a "streak shield" (once per week) to maintain momentum without punishment
+- **Milestone timeline** — the dashboard shows a visual timeline of achievements, so the child can look back at how far they've come
 
 ## Development Guidelines
 
