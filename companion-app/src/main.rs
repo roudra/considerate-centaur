@@ -14,6 +14,7 @@ use uuid::Uuid;
 use educational_companion::learner;
 use educational_companion::learner::{InitialPreferences, LearnerError, LearnerProfile, ObservedBehavior};
 use educational_companion::lock::LockManager;
+use educational_companion::progress;
 
 /// Shared application state passed to every route handler.
 #[derive(Clone)]
@@ -87,6 +88,40 @@ fn learner_error_response(err: LearnerError) -> (StatusCode, Json<ErrorResponse>
             )),
         ),
         LearnerError::Json(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::new(
+                format!("Serialization error: {e}"),
+                "JSON_ERROR",
+            )),
+        ),
+    }
+}
+
+/// Convert a `ProgressError` to an HTTP response.
+fn progress_error_response(err: progress::ProgressError) -> (StatusCode, Json<ErrorResponse>) {
+    match err {
+        progress::ProgressError::NotFound(id) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse::new(
+                format!("Progress not found for learner: {id}"),
+                "PROGRESS_NOT_FOUND",
+            )),
+        ),
+        progress::ProgressError::InvalidSchemaVersion { expected, actual } => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ErrorResponse::new(
+                format!("Schema version mismatch: expected {expected}, got {actual}"),
+                "INVALID_SCHEMA_VERSION",
+            )),
+        ),
+        progress::ProgressError::Io(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::new(
+                format!("I/O error: {e}"),
+                "IO_ERROR",
+            )),
+        ),
+        progress::ProgressError::Json(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse::new(
                 format!("Serialization error: {e}"),
@@ -210,6 +245,25 @@ async fn delete_learner(
     }
 }
 
+/// `GET /api/v1/learners/:id/skill-health` — return the skill health map for a learner.
+async fn get_skill_health(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let _guard = state.locks.read(id).await;
+    let prog = match progress::read_progress(&state.data_dir, id).await {
+        Ok(p) => p,
+        Err(e) => {
+            let (status, body) = progress_error_response(e);
+            return (status, Json(serde_json::to_value(body.0).unwrap())).into_response();
+        }
+    };
+
+    let today = chrono::Local::now().date_naive();
+    let health_map = progress::build_skill_health_map(&prog, today);
+    (StatusCode::OK, Json(serde_json::to_value(health_map).unwrap())).into_response()
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -229,7 +283,8 @@ async fn main() -> anyhow::Result<()> {
 
     let learner_routes = Router::new()
         .route("/", post(create_learner).get(list_learners))
-        .route("/:id", get(get_learner).put(update_learner).delete(delete_learner));
+        .route("/:id", get(get_learner).put(update_learner).delete(delete_learner))
+        .route("/:id/skill-health", get(get_skill_health));
 
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))

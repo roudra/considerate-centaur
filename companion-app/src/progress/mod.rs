@@ -2,8 +2,13 @@
 // See CLAUDE.md "Progress Tracking" and "Spaced Repetition" sections.
 
 pub mod tracker;
+pub mod spaced;
 
 pub use tracker::*;
+pub use spaced::{
+    build_skill_health_map, classify_skill_health, plan_session_mix, update_spaced_repetition,
+    ReviewCandidate, SkillHealth, SkillHealthEntry, MIN_EASE_FACTOR,
+};
 
 use std::path::Path;
 use thiserror::Error;
