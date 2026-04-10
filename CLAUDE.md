@@ -1,17 +1,12 @@
-# Educational Companion App
+# Educational Companion App — Technical Spec
+
+> **This is the living technical spec.** It defines schemas, features, and architecture.
+> For non-negotiable invariants that never change, see **[CONSTITUTION.md](CONSTITUTION.md)**.
+> If anything here conflicts with the constitution, the constitution wins.
 
 ## Project Vision
 
 An adaptive educational companion that creates personalized learning experiences for children. The system uses Claude to generate assignments, track progress, and adapt to each child's unique way of thinking — with a focus on building logical reasoning skills.
-
-### Design Philosophy: Bones & Soul
-
-This project follows a "bones and soul" principle — both halves are essential:
-
-- **Bones** (Structure): The rigid, load-bearing skeleton — data schemas, skill trees, session formats, APIs, progress tracking. These must be stable and well-defined because everything hangs off them. Without strong bones, progress is unmeasurable and adaptation is guesswork.
-- **Soul** (Adaptive Intelligence): The living, breathing part that makes this more than a quiz engine. Claude's ability to *see* the child — to adapt tone, theme assignments around their interests, recognize frustration, celebrate effort, and write observations that help parents understand how their child thinks. Without soul, this is just a worksheet generator.
-
-Every design decision should ask: does this strengthen the bones, deepen the soul, or both?
 
 ---
 
@@ -801,12 +796,13 @@ The deepest form of learning is explaining a concept to someone else. The system
 - `RUST_LOG` — log level filter (e.g. `info`, `debug`, `educational_companion=debug`). Uses `tracing-subscriber` with `EnvFilter`.
 
 ### Key Principles
-- Every learner is different — never hard-code learning paths; always adapt from observed behavioral data
-- **No static labels** — never categorize a child as a "visual learner" or similar; observe, don't label
+
+All non-negotiable principles live in [CONSTITUTION.md](CONSTITUTION.md). The following are technical guidelines for this codebase:
+
 - Session markdowns are the source of truth for what happened; JSON tracks aggregate state
-- **ZPD-driven**: always target the zone between independent and scaffolded ability
 - Keep the child-facing UI simple, colorful, and distraction-free
 - Parent dashboard shows insights (behavioral trends, ZPD growth), not raw AI output
-- **Growth mindset in all feedback** — praise process, not talent
 - All Claude interactions must go through a central service layer for consistency and cost control
-- Learner data is private — the system never collects or stores real names. The `name` field is always a child-chosen display name (any alias is accepted). The backend must omit `id`, `learnerId`, UUIDs, and any other system-internal identifiers from every Claude API call; only the display name and non-identifying personalization fields are passed.
+- Every module defines its own error enum via `thiserror` — no panics in production code
+- All data structures use `#[serde(rename_all = "camelCase")]`; all behavioral enums use `#[serde(rename_all = "kebab-case")]`
+- Schema version is validated on every file read; mismatches return typed errors

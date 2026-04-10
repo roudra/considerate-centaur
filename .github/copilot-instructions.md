@@ -4,7 +4,10 @@
 
 An adaptive educational companion that creates personalized learning experiences for children, with a focus on building logical reasoning skills. The system uses Claude (Anthropic API) to generate assignments, evaluate responses, and adapt to each child's unique way of thinking.
 
-Read `CLAUDE.md` at the repo root for the full architecture spec. It is the source of truth for all design decisions.
+**Read before writing any code:**
+1. `CONSTITUTION.md` — non-negotiable invariants. If your code violates any of these, the PR will be rejected.
+2. `CLAUDE.md` — the living technical spec. Schemas, features, architecture. This is what you implement against.
+3. This file — coding conventions, project layout, and established patterns.
 
 ## Tech Stack
 
@@ -145,11 +148,15 @@ cargo fmt --check        # Check formatting
 
 ## Common Pitfalls
 
-1. **Don't store ZPD gap** — compute it. See CLAUDE.md.
-2. **Don't send UUIDs to Claude** — sanitize the profile before API calls.
-3. **Don't use `//` comments in JSON files** — they're invalid JSON.
-4. **Don't let Claude decide correctness** — the backend verifies `correctAnswer` independently.
-5. **Don't write session markdown from Claude output directly** — the backend assembles the file from structured data.
-6. **Don't use `unwrap()` in production code** — use `?` or proper error handling.
-7. **Don't hardcode learning paths** — always adapt from observed behavioral data.
-8. **Don't use VARK labels** — no "visual learner" or similar. Observe, don't label.
+These will get your PR rejected. Each references a CONSTITUTION.md principle.
+
+1. **Don't store ZPD gap** — compute it at runtime. (Constitution §7)
+2. **Don't send UUIDs to Claude** — sanitize the profile before API calls. (Constitution §6)
+3. **Don't let Claude decide correctness** — the backend verifies `correctAnswer` independently. (Constitution §5)
+4. **Don't write session markdown from Claude output directly** — the backend assembles the file from structured data. (Constitution §5)
+5. **Don't use discouraging language** — no "Wrong", no "Incorrect", no comparisons. (Constitution §1, §2)
+6. **Don't use VARK labels** — no "visual learner" or similar. Observe, don't label. (Constitution §3)
+7. **Don't collect real names** — `name` is a child-chosen alias. (Constitution §4)
+8. **Don't hardcode learning paths** — always adapt from observed behavioral data. (Constitution §10)
+9. **Don't use `unwrap()` in production code** — use `?` or proper error handling.
+10. **Don't use `//` comments in JSON files** — they're invalid JSON.
