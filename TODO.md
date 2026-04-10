@@ -28,11 +28,18 @@
 ### Other Completed
 - [x] Remove unrelated sync-service code (old MySQL-to-MongoDB Java service)
 
-## Next Steps
-- [x] Initialize Rust project structure (`cargo init`)
-- [ ] Implement learner profile management
-- [ ] Implement Claude API integration layer
-- [ ] Build assignment generation pipeline
-- [ ] Build session management & persistence
-- [ ] Build parent dashboard
-- [ ] Build child-facing learning UI
+## Implementation Issues (GitHub)
+
+| # | Issue | Depends On |
+|---|---|---|
+| #3 | Learner profile data model and CRUD API | — |
+| #4 | Progress tracking data model and persistence | #3 |
+| #5 | Claude API integration layer | #3, #4 |
+| #6 | Assignment generation and verification pipeline | #3, #4, #5 |
+| #7 | Session management and markdown persistence | #3, #4, #5, #6 |
+| #8 | Spaced repetition scheduler (SM-2) | #4 |
+| #9 | Offline assignment buffer and graceful degradation | #3, #4, #5, #6 |
+| #10 | Parent dashboard API | #3, #4, #7, #8 |
+| #11 | Onboarding and calibration session | #3, #4, #6, #7 |
+| #12 | Difficulty adaptation engine | #3, #4, #7 |
+| #13 | Gamification: skill tree, challenges, teach-back | #4, #5, #7 |
