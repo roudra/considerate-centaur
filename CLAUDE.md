@@ -226,6 +226,125 @@ Session files are human-readable logs that capture what happened in each learnin
 - Consider introducing "Problem Decomposition" as a new skill area — showed intuitive breaking-apart behavior
 ```
 
+## Onboarding & First Session
+
+The first session has no behavioral data — no ZPD baselines, no observed frustration patterns, no accuracy history. A cold start risks assignments that are too hard (discouraging) or too easy (boring). The onboarding session must feel like **play, not a test**.
+
+### First Session Flow
+
+1. **Choose Your Name** — the child picks their display name. Can be anything: "DragonMaster", "Luna", "Captain Cheese". This is their identity in the system.
+2. **Interest Discovery** — quick, visual selection of topics they like (dinosaurs, space, animals, robots, art, music, sports, etc.). Presented as icons/images, not a text form.
+3. **Calibration Puzzles** — a series of 8-10 short, varied puzzles across skill categories. Each starts at low difficulty and adapts up/down within the puzzle:
+   - 2 pattern recognition (number sequences, visual patterns)
+   - 2 sequential logic (ordering steps, simple algorithms)
+   - 2 spatial reasoning (shape matching, rotation)
+   - 2 deductive reasoning (simple if-then, elimination)
+4. **Baseline Seeding** — from the calibration results, the backend populates initial ZPD values for each skill:
+   - Highest difficulty solved without help → `independentLevel`
+   - Highest difficulty solved with a hint → `scaffoldedLevel`
+   - Skills not attempted → left at defaults (independentLevel: 1, scaffoldedLevel: 2)
+5. **Welcome Badge** — the child earns their first badge ("Explorer" or similar) just for completing onboarding. Immediate positive reinforcement.
+
+### Design Principles for Onboarding
+- No scores shown — the child should not feel evaluated
+- Every puzzle has a "skip" option — no forced frustration
+- Calibration puzzles are themed around the interests the child just selected
+- The session is shorter than a normal session (10-15 minutes)
+- The tone is exploratory: "Let's see what kinds of puzzles you like!"
+
+## Assignment System
+
+### Multi-Modal Assignment Types
+
+Children engage differently with different modalities. The assignment system supports multiple interaction types beyond text-only problems.
+
+#### Interaction Modalities
+
+| Modality | Examples | Implementation |
+|---|---|---|
+| **Text** | "What comes next: 2, 4, 8, ?" | Standard text input/multiple choice |
+| **Visual-Interactive** | Drag shapes into position, complete a pattern grid, rotate a shape to match | Canvas-based UI components with drag/drop |
+| **Sequencing** | Arrange steps in order, sort items by rule | Drag-to-reorder list components |
+| **Drawing** | Draw the missing shape, sketch a pattern continuation | Simple drawing canvas with shape tools |
+| **Audio-Enhanced** | Spoken instructions for younger children, sound-pattern puzzles | Text-to-speech for prompts, audio playback for patterns |
+| **Teach-Back** | "Explain to your friend why 16 comes next" | Free-text or voice input, evaluated for reasoning quality |
+
+#### Assignment Template with Modality
+
+```json
+{
+  "type": "pattern-completion",
+  "modality": "visual-interactive",
+  "skill": "spatial-reasoning",
+  "difficulty": 3,
+  "theme": "space",
+  "prompt": "The spaceship is flying in a pattern. Drag it to where it goes next!",
+  "interactionType": "drag-drop",
+  "visualAssets": ["grid-3x3", "spaceship-sprite"],
+  "correctAnswer": {"position": [2, 2]},
+  "hints": [
+    "Look at the path the spaceship has taken so far...",
+    "It's moving diagonally — down and to the right!",
+    "Where would it land if it keeps going the same way?"
+  ],
+  "explanation": "The spaceship moves one square down and one square right each time. That's a diagonal pattern!"
+}
+```
+
+#### Age-Based Modality Weighting
+- **Ages 5-6**: Heavy visual-interactive and audio-enhanced, minimal text input
+- **Ages 7-8**: Mix of visual and text, introduce sequencing and drawing
+- **Ages 9-10**: More text-based and teach-back, visual for spatial reasoning
+- **Ages 11+**: Primarily text and teach-back, visual only for complex spatial problems
+
+The system tracks which modalities produce higher engagement (longer time-on-task, higher accuracy) per learner and weights future assignments accordingly.
+
+## Spaced Repetition
+
+### The Problem
+We track `lastPracticed` per skill but have no mechanism to schedule reviews. A skill mastered 3 weeks ago and never revisited will decay. The child might appear to have a high level but can't actually perform at it anymore.
+
+### SM-2 Inspired Algorithm
+
+Each skill in `progress.json` gains spaced repetition fields:
+
+```json
+{
+  "pattern-recognition": {
+    "level": 4,
+    "xp": 340,
+    "lastPracticed": "2026-04-07",
+    "zpd": { "independentLevel": 3, "scaffoldedLevel": 5 },
+    "recentAccuracy": [1, 1, 0, 1, 1],
+    "workingMemorySignal": "stable",
+    "spacedRepetition": {
+      "intervalDays": 7,
+      "easeFactor": 2.5,
+      "nextReviewDate": "2026-04-14",
+      "consecutiveCorrect": 4
+    }
+  }
+}
+```
+
+### How It Works
+
+1. **After each practice session**, update the spaced repetition fields based on performance:
+   - Session accuracy >= 80% → increase `intervalDays` by multiplying with `easeFactor`, increment `consecutiveCorrect`
+   - Session accuracy 60-79% → keep `intervalDays` the same, reset `consecutiveCorrect` to 0
+   - Session accuracy < 60% → reset `intervalDays` to 1 (review tomorrow), decrease `easeFactor` by 0.2 (min 1.3)
+2. **Session planning** checks all skills' `nextReviewDate` and mixes review assignments into new-skill sessions:
+   - Typically 70% new/advancing content, 30% spaced review
+   - If multiple skills are overdue for review, prioritize by: days overdue x skill level (higher-level skills are more costly to lose)
+3. **Review assignments are shorter** — 2-3 quick problems at the `independentLevel` to confirm retention, not full difficulty progression
+
+### Dashboard Visibility
+The parent dashboard shows a "Skill Health" indicator per skill:
+- **Fresh** — practiced recently, next review not due yet
+- **Due** — review date has arrived, will be included in next session
+- **Overdue** — missed review window, skill may be decaying
+- **Rusty** — significantly overdue, will get priority review
+
 ## Skill & Badge System
 
 ### Skill Tree Categories (Logic Focus)
