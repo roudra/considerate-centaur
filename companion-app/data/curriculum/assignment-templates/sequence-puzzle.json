@@ -4,7 +4,7 @@
     "sequenceTypes": ["arithmetic", "geometric", "fibonacci-like"],
     "maxTerms": 6,
     "numberRange": [1, 100],
-    "operations": ["add", "multiply", "power"]
+    "operations": ["add", "multiply"]
   },
   "verificationLevel": "full",
   "verificationMethod": "compute-sequence"

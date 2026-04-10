@@ -7,20 +7,29 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::{path::PathBuf, sync::Arc};
+use tokio::sync::Mutex;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 use educational_companion::assignments::{
     self, AssignmentTemplate, PipelineRequest, VerifiedAssignment,
 };
-use educational_companion::claude::schemas::GeneratedAssignment;
 use educational_companion::learner;
 use educational_companion::learner::{
     InitialPreferences, LearnerError, LearnerProfile, ObservedBehavior,
 };
 use educational_companion::lock::LockManager;
 use educational_companion::progress;
+
+/// Server-side store of verified assignments awaiting child responses.
+///
+/// When the generate endpoint creates a verified assignment, it stores it here
+/// keyed by a unique assignment ID. The evaluate endpoint looks it up by ID —
+/// the client never supplies the correct answer. This prevents clients from
+/// forging correctness (Constitution §5).
+type AssignmentStore = Arc<Mutex<HashMap<String, VerifiedAssignment>>>;
 
 /// Shared application state passed to every route handler.
 #[derive(Clone)]
@@ -29,6 +38,8 @@ struct AppState {
     locks: LockManager,
     /// Assignment templates loaded at startup from the curriculum directory.
     templates: Arc<Vec<AssignmentTemplate>>,
+    /// Server-side store of pending assignments — keyed by assignment ID.
+    pending_assignments: AssignmentStore,
 }
 
 /// JSON body for `POST /api/v1/learners`.
@@ -297,8 +308,9 @@ struct GenerateAssignmentRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SubmitResponseRequest {
-    /// The assignment being answered (as returned by the generate endpoint).
-    assignment: GeneratedAssignment,
+    /// The server-assigned assignment ID (returned by the generate endpoint).
+    /// The client never supplies the correct answer — the server looks it up.
+    assignment_id: String,
     /// The child's free-text response.
     child_response: String,
 }
@@ -311,6 +323,34 @@ struct EvaluateResponse {
     backend_correct: bool,
     /// Placeholder feedback — a full Claude evaluation call would replace this.
     feedback: String,
+}
+
+/// Response from the generate endpoint — includes a server-assigned ID.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GenerateAssignmentResponse {
+    /// Unique ID for this assignment — use this in the evaluate endpoint.
+    assignment_id: String,
+    /// The assignment itself (prompt, hints, difficulty — but NOT the correct answer).
+    assignment: ClientAssignment,
+    /// Whether this needs parent review.
+    needs_parent_review: bool,
+    /// Whether a deterministic fallback was used.
+    used_fallback: bool,
+}
+
+/// The assignment as seen by the client — correct answer is stripped.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientAssignment {
+    #[serde(rename = "type")]
+    pub assignment_type: String,
+    pub skill: String,
+    pub difficulty: u32,
+    pub theme: String,
+    pub prompt: String,
+    pub hints: Vec<String>,
+    pub modality: Option<educational_companion::claude::schemas::AssignmentModality>,
 }
 
 /// `POST /api/v1/learners/:id/assignments/generate`
@@ -364,21 +404,49 @@ async fn generate_assignment(
     // Claude is currently unavailable from this endpoint (no API key wired),
     // so the pipeline falls back to deterministic generation automatically.
     let result: VerifiedAssignment = assignments::run_pipeline(
-        || async { None::<GeneratedAssignment> },
+        || async { None::<educational_companion::claude::schemas::GeneratedAssignment> },
         &state.templates,
         &pipeline_req,
         2,
     )
     .await;
 
-    (StatusCode::OK, Json(serde_json::to_value(result).unwrap())).into_response()
+    // Store the verified assignment server-side, keyed by a unique ID.
+    // The client receives only the ID + a sanitized view (no correct answer).
+    let assignment_id = Uuid::new_v4().to_string();
+
+    let client_view = ClientAssignment {
+        assignment_type: result.assignment.assignment_type.clone(),
+        skill: result.assignment.skill.clone(),
+        difficulty: result.assignment.difficulty,
+        theme: result.assignment.theme.clone(),
+        prompt: result.assignment.prompt.clone(),
+        hints: result.assignment.hints.clone(),
+        modality: result.assignment.modality.clone(),
+    };
+
+    let response = GenerateAssignmentResponse {
+        assignment_id: assignment_id.clone(),
+        assignment: client_view,
+        needs_parent_review: result.needs_parent_review,
+        used_fallback: result.used_fallback,
+    };
+
+    state
+        .pending_assignments
+        .lock()
+        .await
+        .insert(assignment_id, result);
+
+    (StatusCode::OK, Json(serde_json::json!(response))).into_response()
 }
 
 /// `POST /api/v1/learners/:id/assignments/evaluate`
 ///
 /// Evaluates a child's response against the backend-verified correct answer.
-/// This is always a separate call from generation — Claude (when wired) receives
-/// the backend's determination and cannot hallucinate correctness.
+/// The client sends only the assignment ID (from the generate response) and
+/// their answer — the server looks up the stored assignment with the correct
+/// answer. The client NEVER supplies the correct answer (Constitution §5).
 async fn evaluate_response(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -386,7 +454,26 @@ async fn evaluate_response(
 ) -> impl IntoResponse {
     let _guard = state.locks.read(id).await;
 
-    let backend_correct = assignments::check_response_correct(&req.assignment, &req.child_response);
+    // Look up the verified assignment by ID — the client cannot forge this.
+    let stored = state
+        .pending_assignments
+        .lock()
+        .await
+        .remove(&req.assignment_id);
+
+    let Some(verified) = stored else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!("Assignment not found: {}", req.assignment_id),
+                "code": "ASSIGNMENT_NOT_FOUND"
+            })),
+        )
+            .into_response();
+    };
+
+    let backend_correct =
+        assignments::check_response_correct(&verified.assignment, &req.child_response);
 
     let feedback = if backend_correct {
         "You've got it! Great thinking — keep exploring!".to_string()
@@ -400,11 +487,7 @@ async fn evaluate_response(
         feedback,
     };
 
-    (
-        StatusCode::OK,
-        Json(serde_json::to_value(response).unwrap()),
-    )
-        .into_response()
+    (StatusCode::OK, Json(serde_json::json!(response))).into_response()
 }
 
 #[tokio::main]
@@ -434,6 +517,7 @@ async fn main() -> anyhow::Result<()> {
         data_dir: Arc::new(data_dir),
         locks: LockManager::new(),
         templates: Arc::new(templates),
+        pending_assignments: Arc::new(Mutex::new(HashMap::new())),
     };
 
     let assignment_routes = Router::new()

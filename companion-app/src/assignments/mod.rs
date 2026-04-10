@@ -254,7 +254,7 @@ fn verify_deductive_reasoning(assignment: &GeneratedAssignment) -> VerificationS
                         .to_lowercase()
                         .contains(&conclusion_str.to_lowercase())
                 {
-                    return VerificationStatus::Verified;
+                    return VerificationStatus::PartiallyVerified;
                 }
             }
             return VerificationStatus::PartiallyVerified;
@@ -269,7 +269,7 @@ fn verify_deductive_reasoning(assignment: &GeneratedAssignment) -> VerificationS
 /// Checks that `correctAnswer` appears in `acceptableAnswers`.
 fn verify_pattern_matching(assignment: &GeneratedAssignment) -> VerificationStatus {
     if assignment.acceptable_answers.is_empty() {
-        return VerificationStatus::PartiallyVerified;
+        return VerificationStatus::Unverifiable;
     }
     if assignment
         .acceptable_answers
@@ -301,7 +301,7 @@ pub fn verify_assignment(
         },
         VerificationLevel::Full => match method {
             "compute-sequence" => verify_sequence_puzzle(assignment),
-            _ => VerificationStatus::PartiallyVerified,
+            _ => VerificationStatus::Unverifiable,
         },
     }
 }
@@ -994,7 +994,7 @@ mod tests {
             })),
         };
         let status = verify_assignment(&assignment, &VerificationLevel::Partial, "rule-check");
-        assert_eq!(status, VerificationStatus::Verified);
+        assert_eq!(status, VerificationStatus::PartiallyVerified);
     }
 
     #[test]
