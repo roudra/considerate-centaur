@@ -5,3 +5,4 @@ pub mod progress;
 pub mod session;
 pub mod claude;
 pub mod dashboard;
+pub mod lock;

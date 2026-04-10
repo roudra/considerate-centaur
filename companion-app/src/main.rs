@@ -13,11 +13,13 @@ use uuid::Uuid;
 
 use educational_companion::learner;
 use educational_companion::learner::{InitialPreferences, LearnerError, LearnerProfile, ObservedBehavior};
+use educational_companion::lock::LockManager;
 
 /// Shared application state passed to every route handler.
 #[derive(Clone)]
 struct AppState {
     data_dir: Arc<PathBuf>,
+    locks: LockManager,
 }
 
 /// JSON body for `POST /api/v1/learners`.
@@ -122,6 +124,7 @@ async fn create_learner(
         observed_behavior: ObservedBehavior::default(),
     };
 
+    let _guard = state.locks.write(profile.id).await;
     match learner::create_profile(&state.data_dir, &profile).await {
         Ok(()) => (StatusCode::CREATED, Json(serde_json::to_value(&profile).unwrap())).into_response(),
         Err(e) => {
@@ -147,6 +150,7 @@ async fn get_learner(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
+    let _guard = state.locks.read(id).await;
     match learner::read_profile(&state.data_dir, id).await {
         Ok(profile) => (StatusCode::OK, Json(serde_json::to_value(profile).unwrap())).into_response(),
         Err(e) => {
@@ -162,7 +166,8 @@ async fn update_learner(
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateLearnerRequest>,
 ) -> impl IntoResponse {
-    // First read the existing profile so we preserve observedBehavior.
+    // Write lock: read-modify-write must be atomic.
+    let _guard = state.locks.write(id).await;
     let existing = match learner::read_profile(&state.data_dir, id).await {
         Ok(p) => p,
         Err(e) => {
@@ -195,6 +200,7 @@ async fn delete_learner(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
+    let _guard = state.locks.write(id).await;
     match learner::delete_profile(&state.data_dir, id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => {
@@ -218,6 +224,7 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState {
         data_dir: Arc::new(data_dir),
+        locks: LockManager::new(),
     };
 
     let learner_routes = Router::new()
