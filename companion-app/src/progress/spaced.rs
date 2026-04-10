@@ -55,7 +55,7 @@ pub fn update_spaced_repetition(
 
     sr.next_review_date = today
         .checked_add_days(Days::new(sr.interval_days as u64))
-        .unwrap_or(today);
+        .unwrap_or(NaiveDate::MAX);
 }
 
 // ---------------------------------------------------------------------------
