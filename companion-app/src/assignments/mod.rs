@@ -174,27 +174,33 @@ pub fn compute_sequence_next(terms: &[i64]) -> Option<i64> {
 ///
 /// Extracts the term list from the assignment's `verification_data`, computes
 /// the expected next term, and checks it against `correctAnswer`.
+///
+/// Returns `Unverifiable` (not `PartiallyVerified`) whenever the computation
+/// cannot be completed — missing or malformed `verification_data` means the
+/// backend cannot independently confirm correctness, so the assignment must
+/// not be accepted at "full" verification level. The pipeline will retry or
+/// fall back to deterministic generation in that case.
 fn verify_sequence_puzzle(assignment: &GeneratedAssignment) -> VerificationStatus {
     let Some(vd) = &assignment.verification_data else {
-        return VerificationStatus::PartiallyVerified;
+        return VerificationStatus::Unverifiable;
     };
 
     let Some(terms_val) = vd.get("terms") else {
-        return VerificationStatus::PartiallyVerified;
+        return VerificationStatus::Unverifiable;
     };
 
     let Some(terms_array) = terms_val.as_array() else {
-        return VerificationStatus::PartiallyVerified;
+        return VerificationStatus::Unverifiable;
     };
 
     let terms: Vec<i64> = terms_array.iter().filter_map(|v| v.as_i64()).collect();
 
     if terms.len() < 2 {
-        return VerificationStatus::PartiallyVerified;
+        return VerificationStatus::Unverifiable;
     }
 
     let Some(expected) = compute_sequence_next(&terms) else {
-        return VerificationStatus::PartiallyVerified;
+        return VerificationStatus::Unverifiable;
     };
 
     let claude_answer = match &assignment.correct_answer {
@@ -957,7 +963,9 @@ mod tests {
             verification_data: None,
         };
         let status = verify_assignment(&assignment, &VerificationLevel::Full, "compute-sequence");
-        assert_eq!(status, VerificationStatus::PartiallyVerified);
+        // Missing verification_data for a full-level assignment must be
+        // Unverifiable (not PartiallyVerified) so the pipeline retries.
+        assert_eq!(status, VerificationStatus::Unverifiable);
     }
 
     #[test]
