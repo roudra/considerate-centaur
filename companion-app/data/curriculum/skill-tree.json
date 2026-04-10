@@ -53,9 +53,17 @@
   "badges": {
     "milestone": [
       { "id": "first-puzzle", "name": "Puzzle Pioneer", "description": "Complete your first assignment", "condition": "totalAssignments >= 1" },
+      { "id": "onboarding-complete", "name": "Getting Started", "description": "Complete the onboarding session", "condition": "onboardingComplete" },
       { "id": "perfect-session", "name": "Flawless!", "description": "Get every answer right in a session", "condition": "sessionAccuracy == 1.0" },
-      { "id": "ten-sessions", "name": "Dedicated Learner", "description": "Complete 10 sessions", "condition": "totalSessions >= 10" },
-      { "id": "explorer", "name": "Explorer", "description": "Complete the onboarding session", "condition": "onboardingComplete" }
+      { "id": "ten-sessions", "name": "Dedicated Learner", "description": "Complete 10 sessions", "condition": "totalSessions >= 10" }
+    ],
+    "explorer": [
+      { "id": "explore-pattern", "name": "Pattern Explorer", "description": "Try pattern recognition for the first time", "condition": "firstAttempt:pattern-recognition" },
+      { "id": "explore-sequential", "name": "Logic Explorer", "description": "Try sequential logic for the first time", "condition": "firstAttempt:sequential-logic" },
+      { "id": "explore-spatial", "name": "Space Explorer", "description": "Try spatial reasoning for the first time", "condition": "firstAttempt:spatial-reasoning" },
+      { "id": "explore-deductive", "name": "Detective", "description": "Try deductive reasoning for the first time", "condition": "firstAttempt:deductive-reasoning" },
+      { "id": "explore-decomposition", "name": "Problem Breaker", "description": "Try problem decomposition for the first time", "condition": "firstAttempt:problem-decomposition" },
+      { "id": "explore-critical", "name": "Critical Thinker", "description": "Try critical thinking for the first time", "condition": "firstAttempt:critical-thinking" }
     ],
     "skill": [
       { "id": "skill-level-3", "name": "Apprentice", "description": "Reach level 3 in any skill", "condition": "anySkillLevel >= 3" },

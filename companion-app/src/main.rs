@@ -1,3 +1,4 @@
+use anyhow::Context;
 use tracing_subscriber::EnvFilter;
 
 mod learner;
@@ -8,7 +9,7 @@ mod claude;
 mod dashboard;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
@@ -20,11 +21,13 @@ async fn main() {
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
         .await
-        .expect("Failed to bind to port 3000");
+        .context("Failed to bind to port 3000")?;
 
     tracing::info!("Listening on http://0.0.0.0:3000");
 
     axum::serve(listener, app)
         .await
-        .expect("Server error");
+        .context("Server error")?;
+
+    Ok(())
 }

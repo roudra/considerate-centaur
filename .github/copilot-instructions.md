@@ -18,38 +18,39 @@ Read `CLAUDE.md` at the repo root for the full architecture spec. It is the sour
 
 ## Project Layout
 
+Current structure (files marked with * are planned but not yet created):
+
 ```
 companion-app/
   Cargo.toml
   src/
     main.rs               # Axum server entrypoint
-    lib.rs                 # Re-exports modules
     learner/
       mod.rs               # Learner profile CRUD
-      profile.rs           # Profile struct, serialization, validation
+      *profile.rs          # Profile struct, serialization, validation
     assignments/
       mod.rs               # Assignment generation & evaluation pipeline
-      templates.rs         # Assignment template definitions
-      generator.rs         # Claude-powered assignment generation
-      evaluator.rs         # Claude-powered response evaluation
-      verifier.rs          # Backend answer verification (math, logic)
+      *templates.rs        # Assignment template definitions
+      *generator.rs        # Claude-powered assignment generation
+      *evaluator.rs        # Claude-powered response evaluation
+      *verifier.rs         # Backend answer verification (math, logic)
     progress/
       mod.rs               # Progress tracking
-      skills.rs            # Skill tree, XP, leveling
-      badges.rs            # Badge definitions and awarding
-      spaced.rs            # Spaced repetition scheduler (SM-2)
+      *skills.rs           # Skill tree, XP, leveling
+      *badges.rs           # Badge definitions and awarding
+      *spaced.rs           # Spaced repetition scheduler (SM-2)
     session/
       mod.rs               # Session lifecycle management
-      markdown.rs          # Session markdown writer
-      buffer.rs            # Offline assignment buffer
+      *markdown.rs         # Session markdown writer
+      *buffer.rs           # Offline assignment buffer
     claude/
       mod.rs               # Claude API client
-      prompts.rs           # Prompt construction with context injection
-      schemas.rs           # Structured output schemas (serde types)
+      *prompts.rs          # Prompt construction with context injection
+      *schemas.rs          # Structured output schemas (serde types)
     dashboard/
       mod.rs               # Parent dashboard API routes
   data/
-    learners/              # Per-learner directories (created at runtime)
+    learners/              # Per-learner directories (created at runtime, gitignored)
     curriculum/
       skill-tree.json      # Master skill/badge definitions
       assignment-templates/ # Assignment template JSON files
