@@ -1,36 +1,18 @@
-### IntelliJ IDEA ###
-out/
-!**/src/main/**/out/
-!**/src/test/**/out/
+# Rust
+/companion-app/target/
+**/*.rs.bk
+*.pdb
 
-### Eclipse ###
-.apt_generated
-.classpath
-.factorypath
-.project
-.settings
-.springBeans
-.sts4-cache
-bin/
-!**/src/main/**/bin/
-!**/src/test/**/bin/
-
-### NetBeans ###
-/nbproject/private/
-/nbbuild/
-/dist/
-/nbdist/
-/.nb-gradle/
-
-### VS Code ###
+# IDE
 .vscode/
-
-### Mac OS ###
+.idea/
+*.iml
 .DS_Store
-/.idea/
-/doc-gen-service/build/
-/doc-gen-service/bin/
-/doc-gen-service/.gradle/
-/sync-service/.gradle/
-/sync-service/bin/
-/sync-service/build/
+
+# Data (runtime-generated learner data should not be committed)
+/companion-app/data/learners/
+/companion-app/data/buffer/
+
+# Environment
+.env
+*.log

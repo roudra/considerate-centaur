@@ -1,0 +1,141 @@
+# Copilot Instructions — Educational Companion App
+
+## What This Project Is
+
+An adaptive educational companion that creates personalized learning experiences for children, with a focus on building logical reasoning skills. The system uses Claude (Anthropic API) to generate assignments, evaluate responses, and adapt to each child's unique way of thinking.
+
+Read `CLAUDE.md` at the repo root for the full architecture spec. It is the source of truth for all design decisions.
+
+## Tech Stack
+
+- **Language**: Rust (2021 edition)
+- **Web Framework**: Axum
+- **Serialization**: serde / serde_json
+- **AI Integration**: Anthropic Claude API via HTTP (reqwest)
+- **Data Storage**: Local filesystem — JSON files + session markdown files (no database)
+- **Frontend**: Web dashboard (parent view) + child-facing learning UI (TBD)
+- **Testing**: `cargo test`, integration tests in `tests/`
+
+## Project Layout
+
+Current structure (files marked with * are planned but not yet created):
+
+```
+companion-app/
+  Cargo.toml
+  src/
+    main.rs               # Axum server entrypoint
+    learner/
+      mod.rs               # Learner profile CRUD
+      *profile.rs          # Profile struct, serialization, validation
+    assignments/
+      mod.rs               # Assignment generation & evaluation pipeline
+      *templates.rs        # Assignment template definitions
+      *generator.rs        # Claude-powered assignment generation
+      *evaluator.rs        # Claude-powered response evaluation
+      *verifier.rs         # Backend answer verification (math, logic)
+    progress/
+      mod.rs               # Progress tracking
+      *skills.rs           # Skill tree, XP, leveling
+      *badges.rs           # Badge definitions and awarding
+      *spaced.rs           # Spaced repetition scheduler (SM-2)
+    session/
+      mod.rs               # Session lifecycle management
+      *markdown.rs         # Session markdown writer
+      *buffer.rs           # Offline assignment buffer
+    claude/
+      mod.rs               # Claude API client
+      *prompts.rs          # Prompt construction with context injection
+      *schemas.rs          # Structured output schemas (serde types)
+    dashboard/
+      mod.rs               # Parent dashboard API routes
+  data/
+    learners/              # Per-learner directories (created at runtime, gitignored)
+    curriculum/
+      skill-tree.json      # Master skill/badge definitions
+      assignment-templates/ # Assignment template JSON files
+  tests/
+    integration/           # Integration tests
+```
+
+## Key Architecture Rules
+
+### 1. Bones & Soul
+
+Every feature has two sides:
+- **Bones**: the data schema, the API contract, the persistence format. These must be strict, validated, and tested.
+- **Soul**: the adaptive, human-centered behavior. Claude's tone, the way feedback is phrased, the frustration detection. This must feel warm, never mechanical.
+
+### 2. Claude Is the Creative Engine, Not the Source of Truth
+
+- Claude generates assignments and evaluates responses — but the **backend verifies correctness**.
+- Claude does not store state. Every API call includes fresh context from JSON files.
+- **Separate generation from evaluation** — never use the same Claude call for both.
+- All Claude responses use **structured JSON output** (serde-deserializable types), never freeform text.
+
+### 3. Privacy: No Real Names
+
+- The `name` field in `profile.json` is a **child-chosen display name** (any alias).
+- The system never asks for or stores real names.
+- The backend must **omit `id`, `learnerId`, UUIDs** from every Claude API call.
+- Only pass: display name, age, interests, skill levels, ZPD, recent session summaries.
+
+### 4. Data Model
+
+All data structures must match the schemas defined in `CLAUDE.md`:
+- `profile.json` — has `schemaVersion`, child-chosen `name`, `initialPreferences`, `observedBehavior`
+- `progress.json` — has `schemaVersion`, per-skill ZPD (no stored `gap` — compute at runtime), `spacedRepetition` fields, `metacognition`
+- Session markdown — written by the backend, not Claude. Claude provides narrative content as structured output.
+
+### 5. ZPD Gap Is Computed, Never Stored
+
+`gap = scaffoldedLevel - independentLevel` — always calculate at runtime. Storing it creates inconsistency risk.
+
+## Coding Conventions
+
+### Rust Style
+- Use `thiserror` for custom error types, `anyhow` for application-level errors
+- Prefer `Result<T, E>` over panics — never `unwrap()` in production code
+- Use `serde::{Serialize, Deserialize}` for all data structures
+- Use `#[serde(rename_all = "camelCase")]` to match JSON field naming in CLAUDE.md
+- Derive `Clone, Debug` on all public types
+- Use module-level `mod.rs` files that re-export public types
+- Write doc comments (`///`) on all public functions and types
+- Integration tests go in `tests/`, unit tests in `#[cfg(test)]` modules
+
+### File I/O
+- All file operations should be async (tokio::fs)
+- Use proper error handling for missing files (a new learner won't have progress.json yet)
+- Validate `schemaVersion` on read — return an error if it doesn't match expected version
+
+### API Design
+- REST API using Axum with JSON request/response bodies
+- Consistent error responses: `{ "error": "message", "code": "ERROR_CODE" }`
+- All routes prefixed with `/api/v1/`
+
+### Testing
+- Every module should have unit tests for core logic
+- Integration tests should use temporary directories for learner data (don't pollute `data/`)
+- Test both happy paths and error cases (missing files, invalid JSON, schema version mismatch)
+- Use `cargo test` — no external test frameworks needed
+
+## Build & Run
+
+```bash
+cargo build              # Build the project
+cargo test               # Run all tests
+cargo run                # Start the server
+cargo clippy             # Lint
+cargo fmt --check        # Check formatting
+```
+
+## Common Pitfalls
+
+1. **Don't store ZPD gap** — compute it. See CLAUDE.md.
+2. **Don't send UUIDs to Claude** — sanitize the profile before API calls.
+3. **Don't use `//` comments in JSON files** — they're invalid JSON.
+4. **Don't let Claude decide correctness** — the backend verifies `correctAnswer` independently.
+5. **Don't write session markdown from Claude output directly** — the backend assembles the file from structured data.
+6. **Don't use `unwrap()` in production code** — use `?` or proper error handling.
+7. **Don't hardcode learning paths** — always adapt from observed behavioral data.
+8. **Don't use VARK labels** — no "visual learner" or similar. Observe, don't label.
