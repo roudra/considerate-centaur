@@ -167,10 +167,17 @@ Tracks both the **bones** (XP, levels, badges) and the **soul** (ZPD gaps, behav
   "streaks": { "currentDays": 5, "longestDays": 12 },
   "totalSessions": 28,
   "totalTimeMinutes": 680,
+  "totalAssignments": 140,
   "metacognition": {
     "selfCorrectionRate": 0.3,
     "hintRequestRate": 0.15,
     "trend": "improving"
+  },
+  "challengeFlags": {
+    "onboardingComplete": true,
+    "timedChallenge80": false,
+    "bossComplete": false,
+    "teachBackSuccess": false
   }
 }
 ```
@@ -185,6 +192,8 @@ Tracks both the **bones** (XP, levels, badges) and the **soul** (ZPD gaps, behav
 - `metacognition.selfCorrectionRate` — fraction of assignments where the child changed their answer before submitting.
 - `metacognition.hintRequestRate` — proactive hint requests per assignment.
 - `metacognition.trend` — valid values: `improving` | `stable` | `declining`.
+- `totalAssignments` — total individual assignments completed across all sessions. Needed for badge conditions like `totalAssignments >= 1`.
+- `challengeFlags` — a map of boolean flags for challenge/milestone badge conditions. Known keys: `onboardingComplete`, `timedChallenge80`, `bossComplete`, `teachBackSuccess`. The badge eligibility system evaluates these as bare identifiers in condition strings.
 
 **ZPD (Zone of Proximal Development)**: The gap between `independentLevel` and `scaffoldedLevel` is where learning actually happens. The system should always target assignments within this zone — hard enough to stretch, easy enough to succeed with support.
 
@@ -782,7 +791,14 @@ The deepest form of learning is explaining a concept to someone else. The system
 ### Commands
 - Build: `cargo build`
 - Test: `cargo test`
+- Lint: `cargo clippy`
+- Format check: `cargo fmt --check`
 - Run: `cargo run`
+
+### Environment Variables
+- `DATA_DIR` — path to the data directory (default: `data`). All learner profiles, progress files, session markdowns, and buffers are stored here.
+- `ANTHROPIC_API_KEY` — API key for Claude. Required for assignment generation and evaluation. Not needed for offline/template-only mode.
+- `RUST_LOG` — log level filter (e.g. `info`, `debug`, `educational_companion=debug`). Uses `tracing-subscriber` with `EnvFilter`.
 
 ### Key Principles
 - Every learner is different — never hard-code learning paths; always adapt from observed behavioral data

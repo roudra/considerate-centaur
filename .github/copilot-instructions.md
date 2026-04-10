@@ -18,27 +18,30 @@ Read `CLAUDE.md` at the repo root for the full architecture spec. It is the sour
 
 ## Project Layout
 
-Current structure (files marked with * are planned but not yet created):
+Files marked with * are planned but not yet created:
 
 ```
 companion-app/
   Cargo.toml
   src/
-    main.rs               # Axum server entrypoint
+    main.rs               # Axum server entrypoint + route handlers
+    lib.rs                 # Re-exports all modules for integration tests
     learner/
-      mod.rs               # Learner profile CRUD
-      *profile.rs          # Profile struct, serialization, validation
+      mod.rs               # Learner profile CRUD (filesystem persistence)
+      profile.rs           # LearnerProfile struct, enums, serde, validation
+      *onboarding.rs       # Onboarding & calibration flow
     assignments/
       mod.rs               # Assignment generation & evaluation pipeline
       *templates.rs        # Assignment template definitions
       *generator.rs        # Claude-powered assignment generation
       *evaluator.rs        # Claude-powered response evaluation
       *verifier.rs         # Backend answer verification (math, logic)
+      *adaptation.rs       # Within-session and cross-session difficulty adaptation
     progress/
-      mod.rs               # Progress tracking
-      *skills.rs           # Skill tree, XP, leveling
-      *badges.rs           # Badge definitions and awarding
-      *spaced.rs           # Spaced repetition scheduler (SM-2)
+      mod.rs               # Progress persistence + badge eligibility checker
+      tracker.rs           # LearnerProgress, SkillProgress, ZpdLevels, SpacedRepetition structs
+      *spaced.rs           # Spaced repetition scheduling algorithm (SM-2)
+      *gamification.rs     # Skill tree unlock, challenges, teach-back, streak shields
     session/
       mod.rs               # Session lifecycle management
       *markdown.rs         # Session markdown writer
@@ -55,7 +58,8 @@ companion-app/
       skill-tree.json      # Master skill/badge definitions
       assignment-templates/ # Assignment template JSON files
   tests/
-    integration/           # Integration tests
+    learner_profile_tests.rs  # Integration tests for learner CRUD
+    progress_tests.rs         # Integration tests for progress + badge eligibility
 ```
 
 ## Key Architecture Rules
@@ -111,13 +115,23 @@ All data structures must match the schemas defined in `CLAUDE.md`:
 ### API Design
 - REST API using Axum with JSON request/response bodies
 - Consistent error responses: `{ "error": "message", "code": "ERROR_CODE" }`
-- All routes prefixed with `/api/v1/`
+- All business routes prefixed with `/api/v1/` — operational endpoints like `/health` are at the root
+- Server reads `DATA_DIR` env var for data directory (default: `data`)
+- Use `AppState` (in `main.rs`) with `Arc<PathBuf>` for the data directory, passed to handlers via Axum's `State` extractor
 
 ### Testing
 - Every module should have unit tests for core logic
-- Integration tests should use temporary directories for learner data (don't pollute `data/`)
+- Integration tests go in `tests/` (not `tests/integration/`) and use `tempfile::TempDir` for learner data
 - Test both happy paths and error cases (missing files, invalid JSON, schema version mismatch)
 - Use `cargo test` — no external test frameworks needed
+- Import from `educational_companion::` (the lib crate) in integration tests
+
+### Established Patterns (follow these in new modules)
+- **Error types**: each module defines its own error enum via `thiserror` (e.g. `LearnerError`, `ProgressError`) with variants for NotFound, InvalidSchemaVersion, Io, Json
+- **Persistence**: `read_*` validates schemaVersion, `write_*` enforces data invariants (e.g. ring buffer truncation)
+- **Defaults**: behavioral enums default to `Unknown`, numeric fields to 0, optional fields to `None`
+- **Schema version**: always validate `schemaVersion == 1` on read; return a typed error on mismatch
+- **Badge eligibility**: use `check_new_badges()` from `progress` module with a `BadgeContext` for session-scoped conditions
 
 ## Build & Run
 
