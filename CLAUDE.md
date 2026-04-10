@@ -483,7 +483,7 @@ Templates bound what Claude can produce, reducing the hallucination surface.
     "numberRange": [1, 100],
     "operations": ["add", "multiply", "power"]
   },
-  "verifiable": true,
+  "verificationLevel": "full",
   "verificationMethod": "compute-sequence"
 }
 ```
@@ -498,7 +498,7 @@ Templates bound what Claude can produce, reducing the hallucination surface.
     "logicTypes": ["if-then", "elimination", "syllogism"],
     "domainVocabulary": "age-appropriate"
   },
-  "verifiable": "partial",
+  "verificationLevel": "partial",
   "verificationMethod": "rule-check"
 }
 ```
