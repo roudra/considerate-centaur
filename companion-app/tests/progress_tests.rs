@@ -85,7 +85,9 @@ async fn test_write_and_read_round_trip() {
     let id = Uuid::new_v4();
     let progress = make_progress(id);
 
-    progress::write_progress(tmp.path(), &progress).await.unwrap();
+    progress::write_progress(tmp.path(), &progress)
+        .await
+        .unwrap();
     let restored = progress::read_progress(tmp.path(), id).await.unwrap();
     assert_eq!(progress, restored);
 }
@@ -115,7 +117,10 @@ async fn test_read_wrong_schema_version_returns_error() {
     assert!(
         matches!(
             result,
-            Err(progress::ProgressError::InvalidSchemaVersion { expected: 1, actual: 2 })
+            Err(progress::ProgressError::InvalidSchemaVersion {
+                expected: 1,
+                actual: 2
+            })
         ),
         "expected InvalidSchemaVersion, got: {:?}",
         result
@@ -128,9 +133,15 @@ async fn test_no_gap_field_in_written_json() {
     let id = Uuid::new_v4();
     let progress = make_progress(id);
 
-    progress::write_progress(tmp.path(), &progress).await.unwrap();
+    progress::write_progress(tmp.path(), &progress)
+        .await
+        .unwrap();
 
-    let path = tmp.path().join("learners").join(id.to_string()).join("progress.json");
+    let path = tmp
+        .path()
+        .join("learners")
+        .join(id.to_string())
+        .join("progress.json");
     let json = tokio::fs::read_to_string(&path).await.unwrap();
     assert!(!json.contains("\"gap\""), "gap must not be stored in JSON");
 }
@@ -148,7 +159,9 @@ async fn test_write_enforces_ring_buffer() {
         .or_default();
     skill.recent_accuracy = vec![1, 0, 1, 0, 1, 0, 1, 0, 1, 0];
 
-    progress::write_progress(tmp.path(), &progress).await.unwrap();
+    progress::write_progress(tmp.path(), &progress)
+        .await
+        .unwrap();
     let restored = progress::read_progress(tmp.path(), id).await.unwrap();
 
     let ra = &restored.skills["pattern-recognition"].recent_accuracy;
@@ -164,9 +177,15 @@ async fn test_write_creates_parent_dir() {
     let progress = progress::init_progress(id);
 
     // The learner directory does not exist yet.
-    progress::write_progress(tmp.path(), &progress).await.unwrap();
+    progress::write_progress(tmp.path(), &progress)
+        .await
+        .unwrap();
 
-    let path = tmp.path().join("learners").join(id.to_string()).join("progress.json");
+    let path = tmp
+        .path()
+        .join("learners")
+        .join(id.to_string())
+        .join("progress.json");
     assert!(path.exists(), "progress.json should have been created");
 }
 
@@ -194,9 +213,10 @@ async fn test_check_new_badges_none_when_all_earned() {
         category: "milestone".to_string(),
     });
 
-    let new_badges = progress::check_new_badges(&progress, &skill_tree_path(), &BadgeContext::default())
-        .await
-        .unwrap();
+    let new_badges =
+        progress::check_new_badges(&progress, &skill_tree_path(), &BadgeContext::default())
+            .await
+            .unwrap();
 
     assert!(
         !new_badges.iter().any(|(b, _)| b.id == "first-puzzle"),
@@ -210,9 +230,10 @@ async fn test_check_new_badges_first_puzzle() {
     let mut progress = progress::init_progress(id);
     progress.total_assignments = 1; // condition: totalAssignments >= 1
 
-    let new_badges = progress::check_new_badges(&progress, &skill_tree_path(), &BadgeContext::default())
-        .await
-        .unwrap();
+    let new_badges =
+        progress::check_new_badges(&progress, &skill_tree_path(), &BadgeContext::default())
+            .await
+            .unwrap();
 
     assert!(
         new_badges.iter().any(|(b, _)| b.id == "first-puzzle"),
@@ -226,9 +247,10 @@ async fn test_check_new_badges_ten_sessions() {
     let mut progress = progress::init_progress(id);
     progress.total_sessions = 10; // condition: totalSessions >= 10
 
-    let new_badges = progress::check_new_badges(&progress, &skill_tree_path(), &BadgeContext::default())
-        .await
-        .unwrap();
+    let new_badges =
+        progress::check_new_badges(&progress, &skill_tree_path(), &BadgeContext::default())
+            .await
+            .unwrap();
 
     assert!(
         new_badges.iter().any(|(b, _)| b.id == "ten-sessions"),
@@ -242,14 +264,24 @@ async fn test_check_new_badges_streak() {
     let mut progress = progress::init_progress(id);
     progress.streaks.current_days = 7;
 
-    let new_badges = progress::check_new_badges(&progress, &skill_tree_path(), &BadgeContext::default())
-        .await
-        .unwrap();
+    let new_badges =
+        progress::check_new_badges(&progress, &skill_tree_path(), &BadgeContext::default())
+            .await
+            .unwrap();
 
     let ids: Vec<&str> = new_badges.iter().map(|(b, _)| b.id.as_str()).collect();
-    assert!(ids.contains(&"streak-3"), "streak-3 should be earned at 7 days");
-    assert!(ids.contains(&"streak-7"), "streak-7 should be earned at 7 days");
-    assert!(!ids.contains(&"streak-30"), "streak-30 should not be earned at 7 days");
+    assert!(
+        ids.contains(&"streak-3"),
+        "streak-3 should be earned at 7 days"
+    );
+    assert!(
+        ids.contains(&"streak-7"),
+        "streak-7 should be earned at 7 days"
+    );
+    assert!(
+        !ids.contains(&"streak-30"),
+        "streak-30 should not be earned at 7 days"
+    );
 }
 
 #[tokio::test]
@@ -258,50 +290,90 @@ async fn test_check_new_badges_any_skill_level() {
     let mut progress = progress::init_progress(id);
     let mut skill = SkillProgress::default();
     skill.level = 5;
-    progress.skills.insert("pattern-recognition".to_string(), skill);
+    progress
+        .skills
+        .insert("pattern-recognition".to_string(), skill);
 
-    let new_badges = progress::check_new_badges(&progress, &skill_tree_path(), &BadgeContext::default())
-        .await
-        .unwrap();
+    let new_badges =
+        progress::check_new_badges(&progress, &skill_tree_path(), &BadgeContext::default())
+            .await
+            .unwrap();
 
     let ids: Vec<&str> = new_badges.iter().map(|(b, _)| b.id.as_str()).collect();
-    assert!(ids.contains(&"skill-level-3"), "skill-level-3 should be earned at level 5");
-    assert!(ids.contains(&"skill-level-5"), "skill-level-5 should be earned at level 5");
-    assert!(!ids.contains(&"skill-level-7"), "skill-level-7 should not be earned at level 5");
+    assert!(
+        ids.contains(&"skill-level-3"),
+        "skill-level-3 should be earned at level 5"
+    );
+    assert!(
+        ids.contains(&"skill-level-5"),
+        "skill-level-5 should be earned at level 5"
+    );
+    assert!(
+        !ids.contains(&"skill-level-7"),
+        "skill-level-7 should not be earned at level 5"
+    );
 }
 
 #[tokio::test]
 async fn test_check_new_badges_explorer() {
     let id = Uuid::new_v4();
     let mut progress = progress::init_progress(id);
-    progress.skills.insert("pattern-recognition".to_string(), SkillProgress::default());
-    progress.skills.insert("sequential-logic".to_string(), SkillProgress::default());
+    progress
+        .skills
+        .insert("pattern-recognition".to_string(), SkillProgress::default());
+    progress
+        .skills
+        .insert("sequential-logic".to_string(), SkillProgress::default());
 
-    let new_badges = progress::check_new_badges(&progress, &skill_tree_path(), &BadgeContext::default())
-        .await
-        .unwrap();
+    let new_badges =
+        progress::check_new_badges(&progress, &skill_tree_path(), &BadgeContext::default())
+            .await
+            .unwrap();
 
     let ids: Vec<&str> = new_badges.iter().map(|(b, _)| b.id.as_str()).collect();
-    assert!(ids.contains(&"explore-pattern"), "explore-pattern badge should fire");
-    assert!(ids.contains(&"explore-sequential"), "explore-sequential badge should fire");
-    assert!(!ids.contains(&"explore-spatial"), "explore-spatial should not fire — skill not in progress");
+    assert!(
+        ids.contains(&"explore-pattern"),
+        "explore-pattern badge should fire"
+    );
+    assert!(
+        ids.contains(&"explore-sequential"),
+        "explore-sequential badge should fire"
+    );
+    assert!(
+        !ids.contains(&"explore-spatial"),
+        "explore-spatial should not fire — skill not in progress"
+    );
 }
 
 #[tokio::test]
 async fn test_check_new_badges_challenge_flags() {
     let id = Uuid::new_v4();
     let mut progress = progress::init_progress(id);
-    progress.challenge_flags.insert("timedChallenge80".to_string(), true);
-    progress.challenge_flags.insert("teachBackSuccess".to_string(), true);
+    progress
+        .challenge_flags
+        .insert("timedChallenge80".to_string(), true);
+    progress
+        .challenge_flags
+        .insert("teachBackSuccess".to_string(), true);
 
-    let new_badges = progress::check_new_badges(&progress, &skill_tree_path(), &BadgeContext::default())
-        .await
-        .unwrap();
+    let new_badges =
+        progress::check_new_badges(&progress, &skill_tree_path(), &BadgeContext::default())
+            .await
+            .unwrap();
 
     let ids: Vec<&str> = new_badges.iter().map(|(b, _)| b.id.as_str()).collect();
-    assert!(ids.contains(&"speed-round"), "speed-round should be earned when timedChallenge80 is set");
-    assert!(ids.contains(&"teacher"), "teacher should be earned when teachBackSuccess is set");
-    assert!(!ids.contains(&"boss-battle"), "boss-battle should not fire — bossComplete not set");
+    assert!(
+        ids.contains(&"speed-round"),
+        "speed-round should be earned when timedChallenge80 is set"
+    );
+    assert!(
+        ids.contains(&"teacher"),
+        "teacher should be earned when teachBackSuccess is set"
+    );
+    assert!(
+        !ids.contains(&"boss-battle"),
+        "boss-battle should not fire — bossComplete not set"
+    );
 }
 
 #[tokio::test]
@@ -330,14 +402,19 @@ async fn test_check_new_badges_categories_are_correct() {
     progress.total_sessions = 10;
     progress.streaks.current_days = 3;
 
-    let new_badges = progress::check_new_badges(&progress, &skill_tree_path(), &BadgeContext::default())
-        .await
-        .unwrap();
+    let new_badges =
+        progress::check_new_badges(&progress, &skill_tree_path(), &BadgeContext::default())
+            .await
+            .unwrap();
 
     for (badge, cat) in &new_badges {
         match badge.id.as_str() {
             "first-puzzle" | "ten-sessions" => {
-                assert_eq!(cat, "milestone", "{} should be in milestone category", badge.id)
+                assert_eq!(
+                    cat, "milestone",
+                    "{} should be in milestone category",
+                    badge.id
+                )
             }
             "streak-3" => assert_eq!(cat, "streak", "streak-3 should be in streak category"),
             _ => {}

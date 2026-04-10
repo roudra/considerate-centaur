@@ -89,10 +89,7 @@ pub fn classify_skill_health(sr: &SpacedRepetition, today: NaiveDate) -> SkillHe
     if next > today {
         SkillHealth::Fresh
     } else {
-        let days_overdue = today
-            .signed_duration_since(next)
-            .num_days()
-            .max(0) as u64;
+        let days_overdue = today.signed_duration_since(next).num_days().max(0) as u64;
         match days_overdue {
             0 => SkillHealth::Due,
             1..=6 => SkillHealth::Overdue,
@@ -498,10 +495,7 @@ mod tests {
             serde_json::to_string(&SkillHealth::Fresh).unwrap(),
             "\"fresh\""
         );
-        assert_eq!(
-            serde_json::to_string(&SkillHealth::Due).unwrap(),
-            "\"due\""
-        );
+        assert_eq!(serde_json::to_string(&SkillHealth::Due).unwrap(), "\"due\"");
         assert_eq!(
             serde_json::to_string(&SkillHealth::Overdue).unwrap(),
             "\"overdue\""

@@ -1,0 +1,11 @@
+{
+  "type": "sequence-puzzle",
+  "constraints": {
+    "sequenceTypes": ["arithmetic", "geometric", "fibonacci-like"],
+    "maxTerms": 6,
+    "numberRange": [1, 100],
+    "operations": ["add", "multiply", "power"]
+  },
+  "verificationLevel": "full",
+  "verificationMethod": "compute-sequence"
+}

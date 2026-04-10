@@ -58,7 +58,10 @@ pub async fn create_profile(data_dir: &Path, profile: &LearnerProfile) -> Result
 }
 
 /// Reads a learner profile from disk, validating the schema version.
-pub async fn read_profile(data_dir: &Path, learner_id: Uuid) -> Result<LearnerProfile, LearnerError> {
+pub async fn read_profile(
+    data_dir: &Path,
+    learner_id: Uuid,
+) -> Result<LearnerProfile, LearnerError> {
     let path = profile_path(data_dir, learner_id);
 
     let bytes = tokio::fs::read(&path).await.map_err(|e| {

@@ -1,0 +1,10 @@
+{
+  "type": "pattern-matching",
+  "constraints": {
+    "patternTypes": ["color", "shape", "number", "symbol"],
+    "maxPatternLength": 6,
+    "choices": 4
+  },
+  "verificationLevel": "partial",
+  "verificationMethod": "acceptability-check"
+}

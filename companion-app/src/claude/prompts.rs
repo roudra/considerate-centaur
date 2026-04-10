@@ -210,10 +210,10 @@ Output requirements:
 
 /// Build the user message for an assignment generation request.
 pub fn build_generation_prompt(ctx: &GenerationContext) -> String {
-    let profile_json = serde_json::to_string_pretty(&ctx.profile)
-        .unwrap_or_else(|_| "{}".to_string());
-    let progress_json = serde_json::to_string_pretty(&ctx.progress)
-        .unwrap_or_else(|_| "{}".to_string());
+    let profile_json =
+        serde_json::to_string_pretty(&ctx.profile).unwrap_or_else(|_| "{}".to_string());
+    let progress_json =
+        serde_json::to_string_pretty(&ctx.progress).unwrap_or_else(|_| "{}".to_string());
     let summaries_json = serde_json::to_string_pretty(&ctx.recent_session_summaries)
         .unwrap_or_else(|_| "[]".to_string());
 
@@ -253,12 +253,12 @@ Return ONLY the JSON object."#,
 
 /// Build the user message for a response evaluation request.
 pub fn build_evaluation_prompt(ctx: &EvaluationContext) -> String {
-    let profile_json = serde_json::to_string_pretty(&ctx.profile)
-        .unwrap_or_else(|_| "{}".to_string());
-    let assignment_json = serde_json::to_string_pretty(&ctx.assignment)
-        .unwrap_or_else(|_| "{}".to_string());
-    let history_json = serde_json::to_string_pretty(&ctx.session_history)
-        .unwrap_or_else(|_| "[]".to_string());
+    let profile_json =
+        serde_json::to_string_pretty(&ctx.profile).unwrap_or_else(|_| "{}".to_string());
+    let assignment_json =
+        serde_json::to_string_pretty(&ctx.assignment).unwrap_or_else(|_| "{}".to_string());
+    let history_json =
+        serde_json::to_string_pretty(&ctx.session_history).unwrap_or_else(|_| "[]".to_string());
 
     format!(
         r#"Evaluate the child's response to the following assignment.
@@ -294,14 +294,14 @@ Return ONLY the JSON object."#,
 
 /// Build the user message for a session narrative request.
 pub fn build_narrative_prompt(ctx: &NarrativeContext) -> String {
-    let profile_json = serde_json::to_string_pretty(&ctx.profile)
-        .unwrap_or_else(|_| "{}".to_string());
-    let progress_json = serde_json::to_string_pretty(&ctx.progress)
-        .unwrap_or_else(|_| "{}".to_string());
+    let profile_json =
+        serde_json::to_string_pretty(&ctx.profile).unwrap_or_else(|_| "{}".to_string());
+    let progress_json =
+        serde_json::to_string_pretty(&ctx.progress).unwrap_or_else(|_| "{}".to_string());
     let summaries_json = serde_json::to_string_pretty(&ctx.recent_session_summaries)
         .unwrap_or_else(|_| "[]".to_string());
-    let history_json = serde_json::to_string_pretty(&ctx.session_history)
-        .unwrap_or_else(|_| "[]".to_string());
+    let history_json =
+        serde_json::to_string_pretty(&ctx.session_history).unwrap_or_else(|_| "[]".to_string());
 
     format!(
         r#"Generate a session narrative for the session that just ended.

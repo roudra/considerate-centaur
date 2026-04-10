@@ -7,8 +7,9 @@
 /// - Generation and evaluation contexts carry the right data tiers
 use educational_companion::claude::{
     self, ClaudeClient, ClaudeError, DifficultyAdjustment, EvaluationConfidence, EvaluationContext,
-    EvaluationResult, GeneratedAssignment, GenerationContext, NarrativeContext, ObservedBehavioralSignals,
-    ProgressSnapshot, SanitizedProfile, SessionHistoryItem, SessionNarrative, SessionSummary,
+    EvaluationResult, GeneratedAssignment, GenerationContext, NarrativeContext,
+    ObservedBehavioralSignals, ProgressSnapshot, SanitizedProfile, SessionHistoryItem,
+    SessionNarrative, SessionSummary,
 };
 use educational_companion::learner::{
     AttentionPattern, ChallengePreference, InitialPreferences, LearnerProfile, ObservedBehavior,
@@ -104,6 +105,7 @@ fn make_assignment() -> GeneratedAssignment {
         ],
         explanation: "Each step doubles: 2→4→8→16. This is a geometric sequence!".to_string(),
         modality: None,
+        verification_data: None,
     }
 }
 
