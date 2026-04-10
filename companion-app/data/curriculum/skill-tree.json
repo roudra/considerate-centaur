@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "skills": {
+    "pattern-recognition": {
+      "name": "Pattern Recognition",
+      "description": "Sequences, visual patterns, analogies",
+      "category": "logic",
+      "prerequisites": [],
+      "maxLevel": 10,
+      "xpPerLevel": 100
+    },
+    "sequential-logic": {
+      "name": "Sequential Logic",
+      "description": "Ordering, step-by-step processes, algorithms",
+      "category": "logic",
+      "prerequisites": ["pattern-recognition"],
+      "maxLevel": 10,
+      "xpPerLevel": 120
+    },
+    "spatial-reasoning": {
+      "name": "Spatial Reasoning",
+      "description": "Shapes, rotations, maps, symmetry",
+      "category": "logic",
+      "prerequisites": ["pattern-recognition"],
+      "maxLevel": 10,
+      "xpPerLevel": 120
+    },
+    "deductive-reasoning": {
+      "name": "Deductive Reasoning",
+      "description": "If-then logic, elimination, syllogisms",
+      "category": "logic",
+      "prerequisites": ["sequential-logic"],
+      "maxLevel": 10,
+      "xpPerLevel": 140
+    },
+    "problem-decomposition": {
+      "name": "Problem Decomposition",
+      "description": "Breaking problems into parts",
+      "category": "logic",
+      "prerequisites": ["spatial-reasoning"],
+      "maxLevel": 10,
+      "xpPerLevel": 140
+    },
+    "critical-thinking": {
+      "name": "Critical Thinking",
+      "description": "Evaluating claims, finding errors, cause-and-effect",
+      "category": "logic",
+      "prerequisites": ["deductive-reasoning", "problem-decomposition"],
+      "maxLevel": 10,
+      "xpPerLevel": 160
+    }
+  },
+  "badges": {
+    "milestone": [
+      { "id": "first-puzzle", "name": "Puzzle Pioneer", "description": "Complete your first assignment", "condition": "totalAssignments >= 1" },
+      { "id": "perfect-session", "name": "Flawless!", "description": "Get every answer right in a session", "condition": "sessionAccuracy == 1.0" },
+      { "id": "ten-sessions", "name": "Dedicated Learner", "description": "Complete 10 sessions", "condition": "totalSessions >= 10" },
+      { "id": "explorer", "name": "Explorer", "description": "Complete the onboarding session", "condition": "onboardingComplete" }
+    ],
+    "skill": [
+      { "id": "skill-level-3", "name": "Apprentice", "description": "Reach level 3 in any skill", "condition": "anySkillLevel >= 3" },
+      { "id": "skill-level-5", "name": "Journeyman", "description": "Reach level 5 in any skill", "condition": "anySkillLevel >= 5" },
+      { "id": "skill-level-7", "name": "Expert", "description": "Reach level 7 in any skill", "condition": "anySkillLevel >= 7" },
+      { "id": "skill-level-10", "name": "Master", "description": "Reach level 10 in any skill", "condition": "anySkillLevel >= 10" }
+    ],
+    "streak": [
+      { "id": "streak-3", "name": "On a Roll", "description": "3-day learning streak", "condition": "streakDays >= 3" },
+      { "id": "streak-7", "name": "Week Warrior", "description": "7-day learning streak", "condition": "streakDays >= 7" },
+      { "id": "streak-30", "name": "Monthly Master", "description": "30-day learning streak", "condition": "streakDays >= 30" }
+    ],
+    "challenge": [
+      { "id": "speed-round", "name": "Lightning", "description": "Complete a timed challenge with 80%+ accuracy", "condition": "timedChallenge80" },
+      { "id": "boss-battle", "name": "Boss Defeated", "description": "Complete a boss battle challenge", "condition": "bossComplete" },
+      { "id": "teacher", "name": "Teacher", "description": "Successfully teach back a concept", "condition": "teachBackSuccess" }
+    ]
+  }
+}
