@@ -13,12 +13,48 @@ This project follows a "bones and soul" principle — both halves are essential:
 
 Every design decision should ask: does this strengthen the bones, deepen the soul, or both?
 
+---
+
+## Project Quick Reference
+
+### 1. Purpose of This Repository
+
+This repository is an **adaptive educational companion** for children. Its purpose is to:
+
+- Deliver personalized logic and reasoning assignments to individual learners
+- Track progress across a structured skill tree (ZPD-driven, never one-size-fits-all)
+- Surface behavioral insights for parents so they understand *how* their child thinks, not just what they scored
+- Build a "bones and soul" platform: stable data schemas plus Claude's adaptive intelligence
+
+### 2. What Claude Is Expected to Do
+
+Claude is the **creative and adaptive engine** — not the source of truth. Concretely, Claude:
+
+1. **Generates assignments** — themed to the child's interests, calibrated to their ZPD, structured as verifiable JSON
+2. **Evaluates answers** — given the problem, the verified correct answer, and the child's response; provides encouraging, growth-mindset feedback
+3. **Produces session narrative content** — behavioral observation text and continuity notes that the **backend then writes** into session markdown files
+4. **Drives adaptation** — after each session, recommends next-session focus areas, difficulty adjustments, and theme choices
+
+Claude does **not** store state, decide correctness (the backend does), or write files. Every Claude API call is stateless and grounded in fresh data from the JSON files.
+
+### 3. Where Claude Can Hallucinate and How We Mitigate
+
+| Risk Area | Why It Can Hallucinate | Mitigation |
+|---|---|---|
+| **correctAnswer in generated assignments** | Claude may produce a wrong answer for a sequence or arithmetic problem | Backend independently computes and verifies the answer before showing to child |
+| **Session behavioral observations** | Claude may invent observations not supported by the recorded signals | Backend writes session markdown using structured data; Claude's narrative is labeled as "AI observation" and surfaced for parent review |
+| **Cross-session memory** | Claude has no memory between API calls; may confuse learners or invent prior events | Every call includes profile.json, progress.json, and last 2-3 session summaries as grounding context |
+| **Skill/level references** | Claude may reference skill names or levels that don't exist in the skill tree | skill-tree.json is injected into every generation prompt; Claude must reference only valid skill IDs |
+| **Free-form answer evaluation** | For open-ended questions, Claude may incorrectly assess correctness | High-risk types are flagged for parent review; Claude reports a confidence level; backend never auto-confirms ambiguous evaluations |
+
+---
+
 ## Core Architecture
 
 ### Tech Stack
-- **Backend**: Kotlin/Gradle (existing sync-service as foundation)
+- **Backend**: Rust (Actix-Web or Axum for HTTP, serde for JSON serialization)
 - **AI Engine**: Claude API (Anthropic SDK) for assignment generation, evaluation, and adaptive learning
-- **Data Storage**: Structured JSON + session markdown files (no external database)
+- **Data Storage**: Structured JSON + session markdown files (local filesystem, no external database)
 - **Frontend**: Web dashboard (parent view + child-facing learning interface)
 
 ### Directory Structure
@@ -30,16 +66,21 @@ Every design decision should ask: does this strengthen the bones, deepen the sou
     /progress         # Progress tracking, skill trees, badges
     /dashboard        # Parent dashboard API
     /session          # Session management & persistence
+    /claude           # Claude API integration layer
+    /spaced           # Spaced repetition scheduler
+    /offline          # Assignment buffer & offline fallback
   /data
     /learners         # Per-learner directories
       /<learner-id>
-        profile.json          # Learning style, preferences, strengths/weaknesses
-        progress.json         # Cumulative skill scores and badge inventory
+        profile.json          # Display name, age, interests, preferences, observed behavior
+        progress.json         # Cumulative skill scores, ZPD, badges, metacognition
         /sessions
           session-YYYY-MM-DD-HHmm.md  # Session logs (human-readable)
     /curriculum
       skill-tree.json         # Master skill/badge definitions
       assignment-templates/   # Reusable assignment templates
+    /buffer
+      /<learner-id>-buffer.json  # Pre-generated assignments for offline use
   /web
     /parent-dashboard  # Progress dashboard UI
     /learner-ui        # Child-facing learning interface
@@ -51,27 +92,40 @@ Every design decision should ask: does this strengthen the bones, deepen the sou
 
 The profile avoids static "learning style" labels (the VARK model is not supported by research). Instead, it captures initial preferences and lets the system **observe and adapt** through behavioral dimensions tracked in `progress.json`.
 
+> **Note:** The JSON examples below are valid JSON and are intended to be copy/pasteable. Annotations are provided in the surrounding text and field notes; actual stored files must remain valid JSON (no `//` comments).
+
 ```json
 {
+  "schemaVersion": 1,
   "id": "learner-uuid",
-  "name": "Display Name",
+  "name": "StarExplorer42",
   "age": 8,
   "interests": ["dinosaurs", "space", "building"],
   "initialPreferences": {
     "sessionLengthMinutes": 25,
-    "challengePreference": "guided"   // independent | guided | collaborative — parent-set starting point
+    "challengePreference": "guided"
   },
   "observedBehavior": {
-    "frustrationResponse": "unknown",   // perseveres | slows-down | rushes | disengages — learned from sessions
-    "effortAttribution": "unknown",     // process-oriented | outcome-oriented — learned from feedback patterns
-    "hintUsage": "unknown",             // proactive | reactive | avoidant — learned from sessions
+    "frustrationResponse": "unknown",
+    "effortAttribution": "unknown",
+    "hintUsage": "unknown",
     "attentionPattern": {
-      "optimalSessionMinutes": null,    // null until enough data; derived from accuracy-over-time curves
-      "accuracyDecayOnset": null        // minute mark where accuracy starts dropping
+      "optimalSessionMinutes": null,
+      "accuracyDecayOnset": null
     }
   }
 }
 ```
+
+**Field notes:**
+- `schemaVersion` — increment when the schema changes; used for safe migration of existing files.
+- `name` — **display name chosen by the child**. The system never asks for or stores the learner's real name. The child picks whatever they want to be called — a nickname, a character name, anything. This display name is safe to include in Claude API calls as-is.
+- `initialPreferences.challengePreference` — valid values: `independent` | `guided` | `collaborative` (parent-set starting point).
+- `observedBehavior.frustrationResponse` — valid values: `unknown` | `perseveres` | `slows-down` | `rushes` | `disengages` (learned from sessions, never set by questionnaire).
+- `observedBehavior.effortAttribution` — valid values: `unknown` | `process-oriented` | `outcome-oriented`.
+- `observedBehavior.hintUsage` — valid values: `unknown` | `proactive` | `reactive` | `avoidant`.
+- `observedBehavior.attentionPattern.optimalSessionMinutes` — `null` until enough sessions; derived from accuracy-over-time curves.
+- `observedBehavior.attentionPattern.accuracyDecayOnset` — minute mark where accuracy starts dropping; `null` until derived.
 
 **Key principle**: `initialPreferences` are set by the parent. `observedBehavior` is populated entirely by the system from session data — never by questionnaire.
 
@@ -81,6 +135,7 @@ Tracks both the **bones** (XP, levels, badges) and the **soul** (ZPD gaps, behav
 
 ```json
 {
+  "schemaVersion": 1,
   "learnerId": "learner-uuid",
   "skills": {
     "pattern-recognition": {
@@ -88,12 +143,11 @@ Tracks both the **bones** (XP, levels, badges) and the **soul** (ZPD gaps, behav
       "xp": 340,
       "lastPracticed": "2026-04-07",
       "zpd": {
-        "independentLevel": 3,        // can solve alone at this difficulty
-        "scaffoldedLevel": 5,         // can solve with hints at this difficulty
-        "gap": 2                      // the zone of proximal development
+        "independentLevel": 3,
+        "scaffoldedLevel": 5
       },
-      "recentAccuracy": [1, 1, 0, 1, 1],   // last 5 attempts (1=correct, 0=incorrect)
-      "workingMemorySignal": "stable"       // stable | overloaded — from multi-step problem performance
+      "recentAccuracy": [1, 1, 0, 1, 1],
+      "workingMemorySignal": "stable"
     },
     "sequential-logic": {
       "level": 2,
@@ -101,8 +155,7 @@ Tracks both the **bones** (XP, levels, badges) and the **soul** (ZPD gaps, behav
       "lastPracticed": "2026-04-05",
       "zpd": {
         "independentLevel": 1,
-        "scaffoldedLevel": 3,
-        "gap": 2
+        "scaffoldedLevel": 3
       },
       "recentAccuracy": [0, 1, 0, 1, 0],
       "workingMemorySignal": "overloaded"
@@ -115,12 +168,23 @@ Tracks both the **bones** (XP, levels, badges) and the **soul** (ZPD gaps, behav
   "totalSessions": 28,
   "totalTimeMinutes": 680,
   "metacognition": {
-    "selfCorrectionRate": 0.3,        // how often they change an answer before submitting
-    "hintRequestRate": 0.15,          // proactive hint requests per assignment
-    "trend": "improving"              // improving | stable | declining
+    "selfCorrectionRate": 0.3,
+    "hintRequestRate": 0.15,
+    "trend": "improving"
   }
 }
 ```
+
+**Field notes:**
+- `schemaVersion` — increment when the schema changes; used for safe migration of existing files.
+- `zpd.independentLevel` — difficulty level the child can solve without help.
+- `zpd.scaffoldedLevel` — difficulty level the child can reach with hints.
+- **ZPD gap is computed, not stored** — always calculate `gap = scaffoldedLevel - independentLevel` at runtime. Storing it creates inconsistency risk when either level is updated independently.
+- `recentAccuracy` — ring buffer of the last 5 attempts (1 = correct, 0 = incorrect). Backend must truncate to 5 entries on every write.
+- `workingMemorySignal` — valid values: `stable` | `overloaded` (derived from multi-step problem performance).
+- `metacognition.selfCorrectionRate` — fraction of assignments where the child changed their answer before submitting.
+- `metacognition.hintRequestRate` — proactive hint requests per assignment.
+- `metacognition.trend` — valid values: `improving` | `stable` | `declining`.
 
 **ZPD (Zone of Proximal Development)**: The gap between `independentLevel` and `scaffoldedLevel` is where learning actually happens. The system should always target assignments within this zone — hard enough to stretch, easy enough to succeed with support.
 
@@ -206,7 +270,7 @@ Adaptation targets the **Zone of Proximal Development** — always working in th
 1. **Assignment Generation**: Claude generates age-appropriate assignments tailored to the learner's profile, current ZPD levels, and interests (e.g., framing logic puzzles with dinosaur themes for a dinosaur-loving child)
 2. **Response Evaluation**: Claude evaluates free-form answers, provides encouraging feedback, identifies misconceptions, and notes behavioral signals (hesitation, self-correction, speed)
 3. **Adaptive Recommendations**: After each session, Claude analyzes performance and behavioral observations to recommend next-session focus areas, difficulty adjustments, and theme choices
-4. **Session Summaries**: Claude produces the session markdown with behavioral observations and continuity notes that reference previous sessions
+4. **Session Summaries**: Claude generates the behavioral observation text and continuity notes as structured output; the **backend then assembles and writes** the session markdown file. Claude provides the narrative; the backend is the author of the file on disk (the source of truth).
 5. **Session-to-Session Memory**: Claude references prior sessions to build narrative continuity ("Remember yesterday when you cracked that tricky pattern? Let's build on that today")
 
 ### Prompt Design Principles
@@ -224,10 +288,11 @@ Adaptation targets the **Zone of Proximal Development** — always working in th
 
 #### 1. Structured Output, Not Freeform Generation
 
-All Claude responses must use structured JSON schemas, never freeform text that gets parsed:
+All Claude responses must use structured JSON schemas, never freeform text that gets parsed.
+
+Example — assignment object returned by Claude:
 
 ```json
-// Claude returns structured assignment objects
 {
   "type": "sequence-puzzle",
   "skill": "pattern-recognition",
@@ -286,10 +351,11 @@ By giving Claude the correct answer during evaluation, it cannot hallucinate whe
 
 #### 4. Constrain Generation with Assignment Templates
 
-Templates bound what Claude can produce, reducing the hallucination surface:
+Templates bound what Claude can produce, reducing the hallucination surface.
+
+`assignment-templates/sequence-puzzle.json`:
 
 ```json
-// assignment-templates/sequence-puzzle.json
 {
   "type": "sequence-puzzle",
   "constraints": {
@@ -303,8 +369,9 @@ Templates bound what Claude can produce, reducing the hallucination surface:
 }
 ```
 
+`assignment-templates/deductive-reasoning.json`:
+
 ```json
-// assignment-templates/deductive-reasoning.json
 {
   "type": "deductive-reasoning",
   "constraints": {
@@ -405,8 +472,9 @@ The parent is the final verification layer for edge cases. Over time, the review
 ## Development Guidelines
 
 ### Commands
-- Build: `cd sync-service && ./gradlew build`
-- Test: `cd sync-service && ./gradlew test`
+- Build: `cargo build`
+- Test: `cargo test`
+- Run: `cargo run`
 
 ### Key Principles
 - Every learner is different — never hard-code learning paths; always adapt from observed behavioral data
@@ -417,4 +485,4 @@ The parent is the final verification layer for edge cases. Over time, the review
 - Parent dashboard shows insights (behavioral trends, ZPD growth), not raw AI output
 - **Growth mindset in all feedback** — praise process, not talent
 - All Claude interactions must go through a central service layer for consistency and cost control
-- Learner data is private — never send identifiable info beyond first name to Claude
+- Learner data is private — the system never collects or stores real names. The `name` field is always a child-chosen display name (any alias is accepted). The backend must omit `id`, `learnerId`, UUIDs, and any other system-internal identifiers from every Claude API call; only the display name and non-identifying personalization fields are passed.
