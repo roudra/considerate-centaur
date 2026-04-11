@@ -219,6 +219,68 @@ impl ClaudeClient {
         let narrative: SessionNarrative = serde_json::from_str(&raw)?;
         Ok(narrative)
     }
+
+    /// Call the Claude API with a raw system prompt and user message.
+    ///
+    /// Used by the offline sync path which constructs custom prompts rather
+    /// than going through the typed context structs.
+    pub async fn call_raw(
+        &self,
+        system: &str,
+        user_message: &str,
+    ) -> Result<String, ClaudeError> {
+        self.call(system, user_message).await
+    }
+
+    /// Probe whether the Claude API is reachable and responding.
+    ///
+    /// Sends a minimal 1-token request and considers any HTTP response (even an
+    /// error status) as evidence that the API endpoint is reachable. Returns
+    /// `true` on a successful 2xx response, `false` on any error or non-success
+    /// status.
+    pub async fn probe_availability(&self) -> bool {
+        let request_body = AnthropicRequest {
+            model: self.model.clone(),
+            max_tokens: 1,
+            system: "ping".to_string(),
+            messages: vec![AnthropicMessage {
+                role: "user",
+                content: "ping".to_string(),
+            }],
+        };
+
+        match self
+            .http
+            .post(API_URL)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header("content-type", "application/json")
+            .json(&request_body)
+            .send()
+            .await
+        {
+            Ok(resp) => resp.status().is_success(),
+            Err(_) => false,
+        }
+    }
+
+    /// Check whether the Anthropic API domain is network-reachable.
+    ///
+    /// Attempts an HTTP HEAD request to the API base URL. Any response
+    /// (even an error status) means the network path is open. A connection
+    /// error or transport failure means no connectivity.
+    pub async fn check_network_reachability(&self) -> bool {
+        match self
+            .http
+            .head("https://api.anthropic.com")
+            .send()
+            .await
+        {
+            Ok(_) => true,
+            Err(e) if e.is_connect() || e.is_timeout() => false,
+            Err(_) => false,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
