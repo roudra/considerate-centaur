@@ -297,7 +297,7 @@ pub fn build_session_markdown(
         md.push_str(&n.behavioral_observations);
         md.push('\n');
     } else {
-        md.push_str("*(Behavioral observations unavailable — Claude API was unreachable during this session. Will be updated on next sync.)*\n");
+        md.push_str("*(Behavioral observations unavailable — Claude API was not available during this session. Will be updated on next sync.)*\n");
     }
     md.push('\n');
 
@@ -307,7 +307,7 @@ pub fn build_session_markdown(
         md.push_str(&n.continuity_notes);
         md.push('\n');
     } else {
-        md.push_str("*(Continuity notes unavailable — Claude API was unreachable during this session. Will be updated on next sync.)*\n");
+        md.push_str("*(Continuity notes unavailable — Claude API was not available during this session. Will be updated on next sync.)*\n");
     }
     md.push('\n');
 
@@ -758,7 +758,6 @@ fn title_case_skill(id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::claude::schemas::AssignmentModality;
     use chrono::TimeZone;
 
     fn sample_assignment(skill: &str, difficulty: u32, correct: bool) -> SessionAssignment {
@@ -965,8 +964,8 @@ mod tests {
         let md = build_session_markdown(&session, "StarExplorer42", &params);
 
         assert!(
-            md.contains("unreachable"),
-            "should note Claude was unreachable"
+            md.contains("unavailable"),
+            "should note observations are unavailable"
         );
     }
 

@@ -420,5 +420,5 @@ async fn test_abandoned_session_records_partial_data() {
     assert!(content.contains("### Assignment 1:"));
     assert!(content.contains("- Correct: 1/1"));
     // Narrative placeholder for abandoned sessions.
-    assert!(content.contains("unreachable"));
+    assert!(content.contains("unavailable"));
 }
