@@ -17,8 +17,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::assignments::{
-    run_pipeline, select_skill, PipelineRequest, VerificationStatus,
-    VerifiedAssignment,
+    run_pipeline, select_skill, verify_assignment, PipelineRequest, VerificationLevel,
+    VerificationStatus, VerifiedAssignment,
 };
 use crate::claude::ClaudeClient;
 use crate::progress::tracker::LearnerProgress;
@@ -427,15 +427,42 @@ async fn is_network_unreachable(client: &ClaudeClient) -> bool {
 // Buffer replenishment
 // ---------------------------------------------------------------------------
 
+/// Verify a deterministic fallback assignment using the built-in type-based verifier.
+///
+/// Deterministic fallbacks produced by `generate_deterministic` may have
+/// `VerificationLevel::None` if no template is found (because the templates
+/// list is empty). This function re-verifies such assignments directly, using
+/// the assignment type to select the appropriate backend checker, bypassing
+/// the template system.
+///
+/// Returns the more specific `VerificationStatus` or the original if no
+/// improvement is possible.
+fn verify_fallback_directly(verified: VerifiedAssignment) -> VerifiedAssignment {
+    let assignment_type = verified.assignment.assignment_type.as_str();
+
+    let (level, method) = match assignment_type {
+        "sequence-puzzle" => (VerificationLevel::Full, "compute-sequence"),
+        "deductive-reasoning" => (VerificationLevel::Partial, "rule-check"),
+        "pattern-matching" => (VerificationLevel::Partial, "acceptability-check"),
+        _ => return verified, // cannot improve — return as-is
+    };
+
+    let new_status = verify_assignment(&verified.assignment, &level, method);
+
+    VerifiedAssignment {
+        verification_status: new_status,
+        ..verified
+    }
+}
+
 /// Replenish the assignment buffer with freshly generated, verified assignments.
 ///
 /// Generates [`BUFFER_TARGET_SIZE`] assignments using the same pipeline as the
 /// live session endpoint:
 /// - Skills are selected based on the spaced-repetition schedule and ZPD targets.
 /// - All assignments are pre-verified by the backend (`Verified` or `PartiallyVerified`).
-/// - `Unverifiable` assignments (only possible from Claude-generated content that
-///   the backend cannot confirm) are **not** stored — the fallback uses a
-///   deterministic generation which is always `Verified`.
+/// - `Unverifiable` assignments from Claude (not fallbacks) are **not** stored.
+/// - Deterministic fallbacks are verified directly without the template system.
 ///
 /// If Claude is unavailable, deterministic fallbacks are used (still verified).
 ///
@@ -533,15 +560,37 @@ pub async fn replenish_buffer(
             .await
         };
 
+        // For deterministic fallbacks that lack template metadata (and therefore
+        // received `VerificationStatus::Unverifiable` from the pipeline's
+        // `VerificationLevel::None` path), re-verify using the built-in
+        // type-based checkers directly.  This keeps the template system as
+        // the primary path while still producing correctly-verified assignments
+        // when templates are absent (e.g., test environments, first startup).
+        let verified = if verified.used_fallback
+            && verified.verification_status == VerificationStatus::Unverifiable
+        {
+            verify_fallback_directly(verified)
+        } else {
+            verified
+        };
+
         // Only store assignments the backend can actually verify.
-        // Unverifiable assignments from Claude are rejected; the deterministic
-        // fallback is always correct by construction (its sequence/pattern is
-        // computed, not hallucinated) so it is always accepted.
-        if verified.verification_status == VerificationStatus::Unverifiable && !verified.used_fallback {
-            tracing::warn!(
-                skill = %req.skill,
-                "Buffer replenishment: skipping unverifiable Claude-generated assignment"
-            );
+        // Unverifiable assignments from Claude are rejected.
+        // Deterministic fallbacks that are still Unverifiable after direct
+        // re-verification indicate a logic error — log prominently and skip.
+        if verified.verification_status == VerificationStatus::Unverifiable {
+            if verified.used_fallback {
+                tracing::error!(
+                    skill = %req.skill,
+                    "Buffer replenishment: deterministic fallback returned Unverifiable \
+                     even after direct verification — logic error; skipping entry"
+                );
+            } else {
+                tracing::warn!(
+                    skill = %req.skill,
+                    "Buffer replenishment: skipping unverifiable Claude-generated assignment"
+                );
+            }
             continue;
         }
 
@@ -582,7 +631,8 @@ pub const OFFLINE_NOTES_PLACEHOLDER: &str =
     "*(Continuity notes unavailable — Claude API was not available during this session. Will be updated on next sync.)*";
 
 /// Marker added after a successful retroactive sync so the parent dashboard can
-/// identify synced sessions.
+/// identify synced sessions. The `_(text)_` Markdown italics formatting is
+/// intentional — it renders as a subtle annotation rather than body text.
 pub const SYNCED_MARKER: &str = "*(Behavioral observations generated retroactively after sync.)*";
 
 /// Find session markdown files that are missing behavioral observations.

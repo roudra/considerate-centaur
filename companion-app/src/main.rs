@@ -987,6 +987,8 @@ async fn complete_session(
     // Spawn a background task to replenish the assignment buffer.
     // This runs after the write lock is released so it can re-acquire it.
     // The background task is fire-and-forget — failure is logged, not propagated.
+    // A 10-second timeout is applied to the write lock acquisition to prevent
+    // the task from blocking indefinitely if another operation holds the lock.
     {
         let data_dir = state.data_dir.clone();
         let templates = state.templates.clone();
@@ -995,8 +997,24 @@ async fn complete_session(
         let prog_clone = prog.clone();
 
         tokio::spawn(async move {
-            // Acquire write lock for the buffer replenishment.
-            let _bg_guard = locks.write(learner_id).await;
+            // Acquire write lock with a timeout — buffer replenishment is not
+            // critical to session completion; skip rather than block indefinitely.
+            let lock_result = tokio::time::timeout(
+                tokio::time::Duration::from_secs(10),
+                locks.write(learner_id),
+            )
+            .await;
+
+            let _bg_guard = match lock_result {
+                Ok(guard) => guard,
+                Err(_) => {
+                    tracing::warn!(
+                        learner_id = %learner_id,
+                        "Background buffer replenishment skipped — could not acquire write lock within 10s"
+                    );
+                    return;
+                }
+            };
 
             if let Err(e) = offline::replenish_buffer(
                 &data_dir,

@@ -389,7 +389,11 @@ async fn test_find_sessions_needing_sync_returns_sorted() {
     let needs_sync = find_sessions_needing_sync(dir.path(), learner_id).await;
     assert_eq!(needs_sync.len(), 2);
     // Should be sorted chronologically (alphabetical == chronological for this format).
-    assert!(needs_sync[0] < needs_sync[1]);
+    assert_eq!(
+        needs_sync,
+        vec!["session-2026-04-07-0900", "session-2026-04-09-1000"],
+        "sessions should be returned in chronological order"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -403,10 +407,7 @@ async fn test_replenish_buffer_without_claude_fills_with_deterministic() {
     let dir = temp_data_dir();
     let learner_id = Uuid::new_v4();
 
-    // Build a minimal progress record.
     let progress = educational_companion::progress::LearnerProgress::default_for(learner_id);
-
-    // Load templates from the project's data directory if available, or use empty list.
     let templates: Vec<AssignmentTemplate> = Vec::new();
 
     replenish_buffer(dir.path(), learner_id, &progress, &templates, None)
@@ -418,14 +419,17 @@ async fn test_replenish_buffer_without_claude_fills_with_deterministic() {
         !buffer.assignments.is_empty(),
         "buffer should have assignments after replenishment"
     );
-    // All assignments in the buffer must be deterministic fallbacks (used_fallback=true)
-    // since no Claude client was given. Deterministic fallbacks are always correct
-    // by construction even if verification status is Unverifiable (no template to run
-    // the checker against).
+    // All assignments must use the deterministic fallback (no Claude client was given)
+    // and must not be Unverifiable (the fallback re-verifier should catch sequence puzzles).
     for entry in &buffer.assignments {
         assert!(
             entry.assignment.used_fallback,
             "assignments without Claude should use the deterministic fallback"
+        );
+        assert_ne!(
+            entry.assignment.verification_status,
+            VerificationStatus::Unverifiable,
+            "deterministic fallbacks should be verified by the built-in checker"
         );
     }
 }
