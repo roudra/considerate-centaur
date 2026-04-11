@@ -715,6 +715,7 @@ async fn record_response(
         self_corrected: req.self_corrected,
         notes: req.notes,
         needs_parent_review: verified.needs_parent_review,
+        is_confidence_builder: false,
     });
 
     let response = RecordResponseResponse {

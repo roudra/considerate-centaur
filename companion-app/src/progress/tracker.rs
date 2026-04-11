@@ -137,6 +137,9 @@ pub struct EarnedBadge {
 pub struct Streaks {
     pub current_days: u32,
     pub longest_days: u32,
+    /// Date the streak shield was last used. Shield is available once per 7-day window.
+    #[serde(default)]
+    pub shield_last_used: Option<chrono::NaiveDate>,
 }
 
 /// Metacognition signals derived from session behavior.
@@ -240,6 +243,7 @@ mod tests {
             streaks: Streaks {
                 current_days: 5,
                 longest_days: 12,
+                shield_last_used: None,
             },
             total_sessions: 28,
             total_time_minutes: 680,

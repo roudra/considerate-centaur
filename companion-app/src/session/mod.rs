@@ -65,6 +65,9 @@ pub struct SessionAssignment {
     /// Whether this assignment was flagged for parent review at generation time.
     #[serde(default)]
     pub needs_parent_review: bool,
+    /// Whether this was a confidence-builder assignment (excluded from adaptation metrics).
+    #[serde(default)]
+    pub is_confidence_builder: bool,
 }
 
 /// An active session stored server-side in memory.
@@ -884,6 +887,7 @@ mod tests {
             self_corrected: false,
             notes: None,
             needs_parent_review: false,
+            is_confidence_builder: false,
         }
     }
 

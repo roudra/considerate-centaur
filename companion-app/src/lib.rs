@@ -2,8 +2,10 @@
 pub mod assignments;
 pub mod claude;
 pub mod dashboard;
+pub mod gamification;
 pub mod learner;
 pub mod lock;
 pub mod offline;
+pub mod onboarding;
 pub mod progress;
 pub mod session;

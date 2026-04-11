@@ -43,6 +43,7 @@ fn make_progress(learner_id: Uuid) -> LearnerProgress {
         streaks: Streaks {
             current_days: 5,
             longest_days: 12,
+            shield_last_used: None,
         },
         total_sessions: 28,
         total_time_minutes: 680,

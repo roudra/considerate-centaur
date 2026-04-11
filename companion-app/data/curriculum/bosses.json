@@ -1,0 +1,35 @@
+[
+  {
+    "id": "logic-gauntlet",
+    "name": "Logic Gauntlet",
+    "description": "A multi-step challenge combining pattern recognition and sequential logic. Solve the sequence, then order the steps to reach the answer.",
+    "requiredSkills": {
+      "pattern-recognition": 3,
+      "sequential-logic": 2
+    },
+    "badgeId": "boss-logic-gauntlet",
+    "badgeName": "Gauntlet Victor"
+  },
+  {
+    "id": "space-navigator",
+    "name": "Space Navigator",
+    "description": "Navigate a grid using spatial reasoning and deductive clues to find the hidden treasure.",
+    "requiredSkills": {
+      "spatial-reasoning": 3,
+      "deductive-reasoning": 2
+    },
+    "badgeId": "boss-space-navigator",
+    "badgeName": "Space Navigator"
+  },
+  {
+    "id": "master-detective",
+    "name": "Master Detective",
+    "description": "Use deductive reasoning and problem decomposition to solve a multi-layered mystery.",
+    "requiredSkills": {
+      "deductive-reasoning": 4,
+      "problem-decomposition": 3
+    },
+    "badgeId": "boss-master-detective",
+    "badgeName": "Master Detective"
+  }
+]

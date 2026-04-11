@@ -10,6 +10,8 @@
 //
 // Generation and evaluation are always separate API operations.
 
+pub mod adaptation;
+
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
