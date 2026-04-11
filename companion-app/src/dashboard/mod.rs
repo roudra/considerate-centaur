@@ -80,7 +80,7 @@ pub struct ReviewQueueItem {
     pub parent_notes: Option<String>,
 }
 
-/// The serialised review queue stored in `review-queue.json`.
+/// The serialized review queue stored in `review-queue.json`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewQueue {

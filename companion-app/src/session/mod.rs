@@ -569,7 +569,8 @@ pub async fn list_sessions(
     let total = all_metadata.len();
     let per_page = params.per_page.clamp(1, 100);
     let page = params.page.max(1);
-    let total_pages = total.div_ceil(per_page).max(1);
+    // When total == 0, total_pages is 0 (no pages to fetch).
+    let total_pages = total.div_ceil(per_page);
 
     let start = (page - 1) * per_page;
     let items = if start >= total {
