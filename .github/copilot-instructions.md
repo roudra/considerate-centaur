@@ -154,9 +154,45 @@ These will get your PR rejected. Each references a CONSTITUTION.md principle.
 2. **Don't send UUIDs to Claude** — sanitize the profile before API calls. (Constitution §6)
 3. **Don't let Claude decide correctness** — the backend verifies `correctAnswer` independently. (Constitution §5)
 4. **Don't write session markdown from Claude output directly** — the backend assembles the file from structured data. (Constitution §5)
-5. **Don't use discouraging language** — no "Wrong", no "Incorrect", no comparisons. (Constitution §1, §2)
-6. **Don't use VARK labels** — no "visual learner" or similar. Observe, don't label. (Constitution §3)
-7. **Don't collect real names** — `name` is a child-chosen alias. (Constitution §4)
-8. **Don't hardcode learning paths** — always adapt from observed behavioral data. (Constitution §10)
-9. **Don't use `unwrap()` in production code** — use `?` or proper error handling.
-10. **Don't use `//` comments in JSON files** — they're invalid JSON.
+5. **Don't trust the client** — never accept `correctAnswer`, verification data, or assignment content from the client. Store verified assignments server-side; the client sends only an assignment ID. (Constitution §5)
+6. **Don't use discouraging language** — no "Wrong", no "Incorrect", no comparisons. (Constitution §1, §2)
+7. **Don't use VARK labels** — no "visual learner" or similar. Observe, don't label. (Constitution §3)
+8. **Don't collect real names** — `name` is a child-chosen alias. (Constitution §4)
+9. **Don't hardcode learning paths** — always adapt from observed behavioral data. (Constitution §10)
+10. **Don't use `unwrap()` in production code** — use `?` or proper error handling.
+11. **Don't use `//` comments in JSON files** — they're invalid JSON.
+12. **Don't silently weaken verification** — if backend cannot verify a "full" level assignment, return `Unverifiable` and retry/fallback. Never downgrade to `PartiallyVerified` when the check couldn't actually run.
+
+## Self-Review Checklist
+
+Before marking your PR as ready, review your own code against these questions. Treat this as an adversarial analysis — actively try to break your implementation.
+
+### Trust & Security
+- [ ] Who is trusted in this flow? Who isn't? Where is the boundary?
+- [ ] Can the client forge, replay, or manipulate any data that affects correctness?
+- [ ] Does any endpoint accept data from the client that should only come from the server?
+- [ ] Are correct answers, verification data, or internal state ever exposed to the client?
+
+### Failure Semantics
+- [ ] What happens when an external call fails (Claude API, file I/O, JSON parse)?
+- [ ] What happens when data is missing, malformed, or has a wrong schema version?
+- [ ] If a verification or check cannot be completed, does it fail safe (Unverifiable) or fail open (PartiallyVerified)?
+- [ ] Are there any code paths where an error is silently swallowed?
+
+### Concurrency & Data Integrity
+- [ ] Do all route handlers that read learner data acquire a read lock via `state.locks.read(id)`?
+- [ ] Do all route handlers that write learner data acquire a write lock via `state.locks.write(id)`?
+- [ ] Is there any read-modify-write sequence that isn't protected by a single write lock?
+- [ ] Could two concurrent requests corrupt state (e.g., both read, both modify, second write overwrites first)?
+
+### Constitution Compliance
+- [ ] Does any feedback text violate growth mindset principles? (Constitution §1, §2)
+- [ ] Does any data sent to Claude contain UUIDs, learnerId, or schemaVersion? (Constitution §5, §6)
+- [ ] Is ZPD gap stored anywhere, or always computed at runtime? (Constitution §7)
+- [ ] Does the system degrade gracefully if Claude is unavailable? (Constitution §8)
+
+### Data Invariants
+- [ ] Is `recentAccuracy` ring buffer capped at 5 on every write path?
+- [ ] Is `schemaVersion` validated on every file read?
+- [ ] Are `observedBehavior` fields only modified by the session system, never by API input?
+- [ ] Are all JSON field names camelCase and all behavioral enum values kebab-case?
