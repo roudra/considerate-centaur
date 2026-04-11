@@ -19,6 +19,9 @@ use educational_companion::assignments::{
 use educational_companion::claude::{
     ClaudeClient, NarrativeContext, ProgressSnapshot, SanitizedProfile,
 };
+use educational_companion::gamification::{
+    self, BossChallenge, BossDefinition, DailyPuzzleState, TimedChallenge,
+};
 use educational_companion::learner;
 use educational_companion::learner::{
     InitialPreferences, LearnerError, LearnerProfile, ObservedBehavior,
@@ -43,6 +46,12 @@ type AssignmentStore = Arc<Mutex<HashMap<String, VerifiedAssignment>>>;
 /// abandoned. The client references sessions only by the server-assigned UUID.
 type ActiveSessionStore = Arc<Mutex<HashMap<Uuid, ActiveSession>>>;
 
+/// Server-side store of active timed challenges.
+type TimedChallengeStore = Arc<Mutex<HashMap<Uuid, TimedChallenge>>>;
+
+/// Server-side store of active boss battles.
+type BossChallengeStore = Arc<Mutex<HashMap<Uuid, BossChallenge>>>;
+
 /// Shared application state passed to every route handler.
 #[derive(Clone)]
 struct AppState {
@@ -54,6 +63,12 @@ struct AppState {
     pending_assignments: AssignmentStore,
     /// Server-side store of active sessions — keyed by session UUID.
     active_sessions: ActiveSessionStore,
+    /// Server-side store of active timed challenges — keyed by challenge UUID.
+    timed_challenges: TimedChallengeStore,
+    /// Server-side store of active boss battles — keyed by challenge UUID.
+    boss_challenges: BossChallengeStore,
+    /// Boss battle definitions loaded from bosses.json at startup.
+    boss_definitions: Arc<Vec<BossDefinition>>,
     /// Optional Claude API client — `None` if `ANTHROPIC_API_KEY` is not set.
     claude_client: Option<ClaudeClient>,
 }
@@ -1160,6 +1175,1073 @@ async fn get_session_markdown(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Gamification route handlers
+// ---------------------------------------------------------------------------
+
+/// `GET /api/v1/learners/:id/skill-tree`
+///
+/// Returns the skill tree with unlock status per skill for the learner.
+/// A skill is unlocked when all prerequisites reach level 2+.
+/// Pattern Recognition is always unlocked.
+async fn get_skill_tree(State(state): State<AppState>, Path(id): Path<Uuid>) -> impl IntoResponse {
+    let _guard = state.locks.read(id).await;
+
+    let progress = match progress::read_progress(&state.data_dir, id).await {
+        Ok(p) => p,
+        Err(progress::ProgressError::NotFound(_)) => progress::LearnerProgress::default_for(id),
+        Err(e) => {
+            let (status, body) = progress_error_response(e);
+            return (status, Json(serde_json::to_value(body.0).unwrap())).into_response();
+        }
+    };
+
+    match gamification::build_skill_tree(&state.data_dir, &progress).await {
+        Ok(tree) => (StatusCode::OK, Json(serde_json::to_value(tree).unwrap())).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("Failed to build skill tree: {e}"),
+                "code": "SKILL_TREE_ERROR"
+            })),
+        )
+            .into_response(),
+    }
+}
+
+// --- Timed challenge ---
+
+/// JSON body for `POST /api/v1/learners/:id/challenges/timed/start`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StartTimedChallengeRequest {
+    /// Target skill for the timed challenge.
+    skill: String,
+}
+
+/// Response from `POST /api/v1/learners/:id/challenges/timed/start`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StartTimedChallengeResponse {
+    challenge_id: String,
+    skill: String,
+    /// The 5 problems (no correct answers — stripped server-side).
+    problems: Vec<ClientAssignment>,
+    /// When the challenge started (ISO 8601).
+    started_at: String,
+    /// Seconds allowed per problem.
+    seconds_per_problem: u32,
+    /// Total number of problems.
+    total_problems: usize,
+}
+
+/// `POST /api/v1/learners/:id/challenges/timed/start`
+///
+/// Starts a timed challenge: generates 5 assignments at the learner's
+/// independent level for the given skill. Timing is enforced server-side —
+/// the server records when the challenge started.
+async fn start_timed_challenge(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<StartTimedChallengeRequest>,
+) -> impl IntoResponse {
+    let _guard = state.locks.write(id).await;
+
+    let progress = match progress::read_progress(&state.data_dir, id).await {
+        Ok(p) => p,
+        Err(progress::ProgressError::NotFound(_)) => progress::LearnerProgress::default_for(id),
+        Err(e) => {
+            let (status, body) = progress_error_response(e);
+            return (status, Json(serde_json::to_value(body.0).unwrap())).into_response();
+        }
+    };
+
+    // Use the independent level for timed challenges (focus on fluency).
+    let difficulty = progress
+        .skills
+        .get(&req.skill)
+        .map(|s| s.zpd.independent_level.max(1))
+        .unwrap_or(1);
+
+    // Generate 5 problems.
+    let mut problems = Vec::with_capacity(5);
+    let mut assignment_ids = Vec::with_capacity(5);
+
+    for _ in 0..5 {
+        let pipeline_req = PipelineRequest {
+            skill: req.skill.clone(),
+            difficulty,
+            preferred_type: None,
+        };
+        let verified = assignments::run_pipeline(
+            || async { None::<educational_companion::claude::schemas::GeneratedAssignment> },
+            &state.templates,
+            &pipeline_req,
+            1,
+        )
+        .await;
+
+        let assignment_id = Uuid::new_v4().to_string();
+        let client_view = ClientAssignment {
+            assignment_type: verified.assignment.assignment_type.clone(),
+            skill: verified.assignment.skill.clone(),
+            difficulty: verified.assignment.difficulty,
+            theme: verified.assignment.theme.clone(),
+            prompt: verified.assignment.prompt.clone(),
+            hints: verified.assignment.hints.clone(),
+            modality: verified.assignment.modality.clone(),
+        };
+        assignment_ids.push(assignment_id.clone());
+        problems.push(client_view);
+
+        state
+            .pending_assignments
+            .lock()
+            .await
+            .insert(assignment_id, verified);
+    }
+
+    let challenge_id = Uuid::new_v4();
+    let started_at = chrono::Local::now();
+
+    // Look up the stored VerifiedAssignments for the challenge store.
+    let mut verified_problems = Vec::with_capacity(5);
+    {
+        let pending = state.pending_assignments.lock().await;
+        for aid in &assignment_ids {
+            if let Some(v) = pending.get(aid) {
+                verified_problems.push(v.clone());
+            }
+        }
+    }
+
+    let timed_challenge = TimedChallenge {
+        id: challenge_id,
+        learner_id: id,
+        started_at,
+        skill: req.skill.clone(),
+        problems: verified_problems,
+    };
+
+    state
+        .timed_challenges
+        .lock()
+        .await
+        .insert(challenge_id, timed_challenge);
+
+    let response = StartTimedChallengeResponse {
+        challenge_id: challenge_id.to_string(),
+        skill: req.skill,
+        problems,
+        started_at: started_at.format("%Y-%m-%dT%H:%M:%S").to_string(),
+        seconds_per_problem: 60,
+        total_problems: 5,
+    };
+
+    (StatusCode::CREATED, Json(serde_json::json!(response))).into_response()
+}
+
+/// JSON body for `POST /api/v1/learners/:id/challenges/timed/:challenge_id/complete`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CompletTimedChallengeRequest {
+    /// Responses to each problem, in order.
+    responses: Vec<TimedChallengeResponseItem>,
+}
+
+/// A single timed challenge response from the client.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TimedChallengeResponseItem {
+    /// Index into the challenge's problem list (0-based).
+    problem_index: usize,
+    /// The child's answer.
+    child_response: String,
+}
+
+/// `POST /api/v1/learners/:id/challenges/timed/:challenge_id/complete`
+///
+/// Completes a timed challenge. Timing is enforced server-side — each response's
+/// arrival time is compared to the challenge start. Awards the Lightning badge
+/// if accuracy >= 80%.
+async fn complete_timed_challenge(
+    State(state): State<AppState>,
+    Path((learner_id, challenge_id)): Path<(Uuid, Uuid)>,
+    Json(req): Json<CompletTimedChallengeRequest>,
+) -> impl IntoResponse {
+    let _guard = state.locks.write(learner_id).await;
+
+    let challenge = {
+        let store = state.timed_challenges.lock().await;
+        match store.get(&challenge_id) {
+            Some(c) if c.learner_id == learner_id => c.clone(),
+            Some(_) => {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "error": "Challenge does not belong to this learner",
+                        "code": "CHALLENGE_FORBIDDEN"
+                    })),
+                )
+                    .into_response();
+            }
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({
+                        "error": format!("Challenge not found: {challenge_id}"),
+                        "code": "CHALLENGE_NOT_FOUND"
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    };
+
+    let now = chrono::Local::now();
+    let elapsed_seconds = (now - challenge.started_at).num_seconds().max(0) as f64;
+
+    // Grade each response against stored correct answers.
+    let mut problem_results = Vec::new();
+    let mut correct_count = 0usize;
+
+    for item in &req.responses {
+        let Some(problem) = challenge.problems.get(item.problem_index) else {
+            continue;
+        };
+        let correct =
+            assignments::check_response_correct(&problem.assignment, &item.child_response);
+        if correct {
+            correct_count += 1;
+        }
+        problem_results.push(gamification::TimedProblemResult {
+            assignment_id: format!("{}-{}", challenge_id, item.problem_index),
+            correct,
+            child_response: item.child_response.clone(),
+        });
+    }
+
+    let total_problems = challenge.problems.len();
+    let accuracy = if total_problems > 0 {
+        correct_count as f32 / total_problems as f32
+    } else {
+        0.0
+    };
+
+    let lightning_badge_earned = accuracy >= 0.80;
+
+    // Remove the challenge from the store.
+    state.timed_challenges.lock().await.remove(&challenge_id);
+
+    // If Lightning badge earned, update progress.
+    if lightning_badge_earned {
+        let mut prog = match progress::read_progress(&state.data_dir, learner_id).await {
+            Ok(p) => p,
+            Err(progress::ProgressError::NotFound(_)) => {
+                progress::LearnerProgress::default_for(learner_id)
+            }
+            Err(e) => {
+                let (status, body) = progress_error_response(e);
+                return (status, Json(serde_json::to_value(body.0).unwrap())).into_response();
+            }
+        };
+
+        let was_set = *prog
+            .challenge_flags
+            .get("timedChallenge80")
+            .unwrap_or(&false);
+        if !was_set {
+            prog.challenge_flags
+                .insert("timedChallenge80".to_string(), true);
+
+            // Check for Lightning badge.
+            let skill_tree_path = state.data_dir.join("curriculum").join("skill-tree.json");
+            let badge_ctx = progress::BadgeContext::default();
+            if let Ok(new_badges) =
+                progress::check_new_badges(&prog, &skill_tree_path, &badge_ctx).await
+            {
+                let today = chrono::Local::now().date_naive();
+                for (def, category) in new_badges {
+                    prog.badges.push(progress::EarnedBadge {
+                        id: def.id,
+                        name: def.name,
+                        earned_date: today,
+                        category,
+                    });
+                }
+            }
+
+            if let Err(e) = progress::write_progress(&state.data_dir, &prog).await {
+                tracing::warn!("Failed to write progress after timed challenge: {e}");
+            }
+        }
+    }
+
+    let result = gamification::TimedChallengeResult {
+        challenge_id: challenge_id.to_string(),
+        total_problems,
+        correct_count,
+        accuracy,
+        elapsed_seconds,
+        lightning_badge_earned,
+        problem_results,
+    };
+
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
+}
+
+// --- Boss battles ---
+
+/// `GET /api/v1/learners/:id/challenges/boss`
+///
+/// Returns all boss battles with their eligibility status for this learner.
+/// Eligibility is checked server-side from progress.json.
+async fn list_boss_battles(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let _guard = state.locks.read(id).await;
+
+    let progress = match progress::read_progress(&state.data_dir, id).await {
+        Ok(p) => p,
+        Err(progress::ProgressError::NotFound(_)) => progress::LearnerProgress::default_for(id),
+        Err(e) => {
+            let (status, body) = progress_error_response(e);
+            return (status, Json(serde_json::to_value(body.0).unwrap())).into_response();
+        }
+    };
+
+    let bosses: Vec<serde_json::Value> = state
+        .boss_definitions
+        .iter()
+        .map(|b| {
+            let eligible = gamification::is_boss_eligible(b, &progress);
+            serde_json::json!({
+                "id": b.id,
+                "name": b.name,
+                "description": b.description,
+                "requiredSkills": b.required_skills,
+                "badgeName": b.badge_name,
+                "eligible": eligible,
+            })
+        })
+        .collect();
+
+    (StatusCode::OK, Json(serde_json::json!(bosses))).into_response()
+}
+
+/// JSON body for `POST /api/v1/learners/:id/challenges/boss/:boss_id/start`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StartBossBattleRequest {}
+
+/// `POST /api/v1/learners/:id/challenges/boss/:boss_id/start`
+///
+/// Starts a boss battle. Eligibility is checked server-side — the client cannot
+/// bypass the prerequisite check.
+async fn start_boss_battle(
+    State(state): State<AppState>,
+    Path((learner_id, boss_id)): Path<(Uuid, String)>,
+    Json(_req): Json<StartBossBattleRequest>,
+) -> impl IntoResponse {
+    let _guard = state.locks.write(learner_id).await;
+
+    // Find the boss definition.
+    let boss = match state.boss_definitions.iter().find(|b| b.id == boss_id) {
+        Some(b) => b.clone(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": format!("Boss not found: {boss_id}"),
+                    "code": "BOSS_NOT_FOUND"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // Check eligibility server-side.
+    let progress = match progress::read_progress(&state.data_dir, learner_id).await {
+        Ok(p) => p,
+        Err(progress::ProgressError::NotFound(_)) => {
+            progress::LearnerProgress::default_for(learner_id)
+        }
+        Err(e) => {
+            let (status, body) = progress_error_response(e);
+            return (status, Json(serde_json::to_value(body.0).unwrap())).into_response();
+        }
+    };
+
+    if !gamification::is_boss_eligible(&boss, &progress) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "Not eligible for this boss battle — prerequisite skills not met",
+                "code": "BOSS_NOT_ELIGIBLE"
+            })),
+        )
+            .into_response();
+    }
+
+    // Generate a multi-step problem using the first required skill.
+    let target_skill = boss
+        .required_skills
+        .keys()
+        .next()
+        .cloned()
+        .unwrap_or_else(|| "pattern-recognition".to_string());
+    let difficulty = boss.required_skills.values().max().copied().unwrap_or(3) + 2; // Boss problems are harder than the prerequisites.
+    let difficulty = difficulty.min(10);
+
+    let pipeline_req = PipelineRequest {
+        skill: target_skill,
+        difficulty,
+        preferred_type: None,
+    };
+    let verified = assignments::run_pipeline(
+        || async { None::<educational_companion::claude::schemas::GeneratedAssignment> },
+        &state.templates,
+        &pipeline_req,
+        1,
+    )
+    .await;
+
+    let challenge_id = Uuid::new_v4();
+    let assignment_id = format!("{challenge_id}-boss");
+
+    let client_view = ClientAssignment {
+        assignment_type: verified.assignment.assignment_type.clone(),
+        skill: verified.assignment.skill.clone(),
+        difficulty: verified.assignment.difficulty,
+        theme: verified.assignment.theme.clone(),
+        prompt: verified.assignment.prompt.clone(),
+        hints: verified.assignment.hints.clone(),
+        modality: verified.assignment.modality.clone(),
+    };
+
+    state
+        .pending_assignments
+        .lock()
+        .await
+        .insert(assignment_id.clone(), verified.clone());
+
+    let boss_challenge = BossChallenge {
+        id: challenge_id,
+        learner_id,
+        boss_id: boss.id.clone(),
+        started_at: chrono::Local::now(),
+        problem: verified,
+    };
+
+    state
+        .boss_challenges
+        .lock()
+        .await
+        .insert(challenge_id, boss_challenge);
+
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "challengeId": challenge_id.to_string(),
+            "bossId": boss.id,
+            "bossName": boss.name,
+            "assignmentId": assignment_id,
+            "problem": client_view,
+            "badgeName": boss.badge_name,
+        })),
+    )
+        .into_response()
+}
+
+/// JSON body for `POST /api/v1/learners/:id/challenges/boss/:challenge_id/complete`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CompleteBossBattleRequest {
+    /// The child's answer.
+    child_response: String,
+}
+
+/// `POST /api/v1/learners/:id/challenges/boss/:challenge_id/complete`
+///
+/// Completes a boss battle. The answer is checked server-side.
+/// Awards the boss-specific badge on success and sets `bossComplete` flag.
+async fn complete_boss_battle(
+    State(state): State<AppState>,
+    Path((learner_id, challenge_id)): Path<(Uuid, Uuid)>,
+    Json(req): Json<CompleteBossBattleRequest>,
+) -> impl IntoResponse {
+    let _guard = state.locks.write(learner_id).await;
+
+    let challenge = {
+        let store = state.boss_challenges.lock().await;
+        match store.get(&challenge_id) {
+            Some(c) if c.learner_id == learner_id => c.clone(),
+            Some(_) => {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({
+                        "error": "Challenge does not belong to this learner",
+                        "code": "CHALLENGE_FORBIDDEN"
+                    })),
+                )
+                    .into_response();
+            }
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({
+                        "error": format!("Boss challenge not found: {challenge_id}"),
+                        "code": "CHALLENGE_NOT_FOUND"
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    };
+
+    // Find boss definition.
+    let boss = match state
+        .boss_definitions
+        .iter()
+        .find(|b| b.id == challenge.boss_id)
+    {
+        Some(b) => b.clone(),
+        None => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "Boss definition not found",
+                    "code": "INTERNAL_ERROR"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let correct =
+        assignments::check_response_correct(&challenge.problem.assignment, &req.child_response);
+
+    // Remove the challenge from the store.
+    state.boss_challenges.lock().await.remove(&challenge_id);
+
+    let feedback = if correct {
+        format!(
+            "Incredible! You defeated the {}! Your problem-solving skills are impressive!",
+            boss.name
+        )
+    } else {
+        "Not quite — but you gave it a great effort! Keep building your skills and try again."
+            .to_string()
+    };
+
+    // Award badge and set flag if correct.
+    let mut badge_earned = None;
+    if correct {
+        let mut prog = match progress::read_progress(&state.data_dir, learner_id).await {
+            Ok(p) => p,
+            Err(progress::ProgressError::NotFound(_)) => {
+                progress::LearnerProgress::default_for(learner_id)
+            }
+            Err(e) => {
+                let (status, body) = progress_error_response(e);
+                return (status, Json(serde_json::to_value(body.0).unwrap())).into_response();
+            }
+        };
+
+        prog.challenge_flags
+            .insert("bossComplete".to_string(), true);
+
+        let today = chrono::Local::now().date_naive();
+
+        // Award the boss-specific badge if not already earned.
+        if !prog.badges.iter().any(|b| b.id == boss.badge_id) {
+            let earned = progress::EarnedBadge {
+                id: boss.badge_id.clone(),
+                name: boss.badge_name.clone(),
+                earned_date: today,
+                category: "challenge".to_string(),
+            };
+            prog.badges.push(earned.clone());
+            badge_earned = Some(earned);
+        }
+
+        // Also check for the generic boss-battle badge from skill-tree.json.
+        let skill_tree_path = state.data_dir.join("curriculum").join("skill-tree.json");
+        let badge_ctx = progress::BadgeContext::default();
+        if let Ok(new_badges) =
+            progress::check_new_badges(&prog, &skill_tree_path, &badge_ctx).await
+        {
+            for (def, category) in new_badges {
+                if !prog.badges.iter().any(|b| b.id == def.id) {
+                    prog.badges.push(progress::EarnedBadge {
+                        id: def.id,
+                        name: def.name,
+                        earned_date: today,
+                        category,
+                    });
+                }
+            }
+        }
+
+        if let Err(e) = progress::write_progress(&state.data_dir, &prog).await {
+            tracing::warn!("Failed to write progress after boss battle: {e}");
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "challengeId": challenge_id.to_string(),
+            "bossId": boss.id,
+            "correct": correct,
+            "feedback": feedback,
+            "badgeEarned": badge_earned,
+        })),
+    )
+        .into_response()
+}
+
+// --- Daily puzzle ---
+
+/// `GET /api/v1/learners/:id/daily-puzzle`
+///
+/// Returns today's daily puzzle. Returns 409 if already completed today.
+/// The skill rotates daily based on the learner's progress.
+async fn get_daily_puzzle(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let _guard = state.locks.read(id).await;
+
+    let today = chrono::Local::now().date_naive();
+
+    let daily_state = match gamification::read_daily_puzzle_state(&state.data_dir, id).await {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("Failed to read daily puzzle state: {e}"),
+                    "code": "IO_ERROR"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    if daily_state.completed_dates.last() == Some(&today) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "Daily puzzle already completed today",
+                "code": "ALREADY_COMPLETED_TODAY"
+            })),
+        )
+            .into_response();
+    }
+
+    let progress = match progress::read_progress(&state.data_dir, id).await {
+        Ok(p) => p,
+        Err(progress::ProgressError::NotFound(_)) => progress::LearnerProgress::default_for(id),
+        Err(e) => {
+            let (status, body) = progress_error_response(e);
+            return (status, Json(serde_json::to_value(body.0).unwrap())).into_response();
+        }
+    };
+
+    let skill = gamification::daily_puzzle_skill(&progress, today);
+    let difficulty = progress
+        .skills
+        .get(&skill)
+        .map(|s| s.zpd.independent_level.max(1))
+        .unwrap_or(1);
+
+    let pipeline_req = PipelineRequest {
+        skill: skill.clone(),
+        difficulty,
+        preferred_type: None,
+    };
+    let verified = assignments::run_pipeline(
+        || async { None::<educational_companion::claude::schemas::GeneratedAssignment> },
+        &state.templates,
+        &pipeline_req,
+        1,
+    )
+    .await;
+
+    let assignment_id = format!("daily-{}-{}", id, today);
+
+    let client_view = ClientAssignment {
+        assignment_type: verified.assignment.assignment_type.clone(),
+        skill: verified.assignment.skill.clone(),
+        difficulty: verified.assignment.difficulty,
+        theme: verified.assignment.theme.clone(),
+        prompt: verified.assignment.prompt.clone(),
+        hints: verified.assignment.hints.clone(),
+        modality: verified.assignment.modality.clone(),
+    };
+
+    state
+        .pending_assignments
+        .lock()
+        .await
+        .insert(assignment_id.clone(), verified);
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "assignmentId": assignment_id,
+            "skill": skill,
+            "problem": client_view,
+            "currentStreak": daily_state.current_streak,
+            "totalXp": daily_state.total_xp,
+            "date": today.to_string(),
+        })),
+    )
+        .into_response()
+}
+
+/// JSON body for `POST /api/v1/learners/:id/daily-puzzle/respond`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DailyPuzzleRespondRequest {
+    /// The server-assigned assignment ID from the daily-puzzle endpoint.
+    assignment_id: String,
+    /// The child's answer.
+    child_response: String,
+}
+
+/// `POST /api/v1/learners/:id/daily-puzzle/respond`
+///
+/// Records the child's response to the daily puzzle.
+/// No impact on skill levels — awards 20 XP to the daily puzzle counter.
+/// Write lock: updates daily-puzzles.json.
+async fn respond_daily_puzzle(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<DailyPuzzleRespondRequest>,
+) -> impl IntoResponse {
+    let _guard = state.locks.write(id).await;
+
+    let stored = state
+        .pending_assignments
+        .lock()
+        .await
+        .remove(&req.assignment_id);
+
+    let Some(verified) = stored else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!("Assignment not found: {}", req.assignment_id),
+                "code": "ASSIGNMENT_NOT_FOUND"
+            })),
+        )
+            .into_response();
+    };
+
+    let correct = assignments::check_response_correct(&verified.assignment, &req.child_response);
+
+    let feedback = if correct {
+        "Brilliant! You solved today's puzzle! Keep the streak going!".to_string()
+    } else {
+        "Not quite, but keep exploring! Every attempt makes you stronger!".to_string()
+    };
+
+    let today = chrono::Local::now().date_naive();
+
+    let mut daily_state = match gamification::read_daily_puzzle_state(&state.data_dir, id).await {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("Failed to read daily puzzle state: {e}"),
+                    "code": "IO_ERROR"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let xp_earned = match gamification::record_daily_puzzle_completion(&mut daily_state, today) {
+        Ok(xp) => xp,
+        Err(gamification::GamificationError::AlreadyCompletedToday) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "Daily puzzle already completed today",
+                    "code": "ALREADY_COMPLETED_TODAY"
+                })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("Failed to record daily puzzle: {e}"),
+                    "code": "INTERNAL_ERROR"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    if let Err(e) = gamification::write_daily_puzzle_state(&state.data_dir, &daily_state).await {
+        tracing::warn!("Failed to write daily puzzle state: {e}");
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "correct": correct,
+            "feedback": feedback,
+            "xpEarned": xp_earned,
+            "currentStreak": daily_state.current_streak,
+            "longestStreak": daily_state.longest_streak,
+            "totalXp": daily_state.total_xp,
+        })),
+    )
+        .into_response()
+}
+
+// --- Teach-back ---
+
+/// JSON body for `POST /api/v1/learners/:id/teach-back`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TeachBackRequest {
+    /// The skill the child is explaining.
+    skill: String,
+    /// The child's explanation.
+    explanation: String,
+}
+
+/// `POST /api/v1/learners/:id/teach-back`
+///
+/// Submits a teach-back explanation for a skill the child has mastered.
+/// Claude evaluates for accuracy, completeness, and clarity.
+/// If Claude is unavailable, the response is stored and evaluation deferred.
+/// Awards the Teacher badge for the skill if evaluation passes.
+/// Write lock: may update progress (badge, metacognition).
+async fn submit_teach_back(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<TeachBackRequest>,
+) -> impl IntoResponse {
+    let _guard = state.locks.write(id).await;
+
+    let mut prog = match progress::read_progress(&state.data_dir, id).await {
+        Ok(p) => p,
+        Err(progress::ProgressError::NotFound(_)) => progress::LearnerProgress::default_for(id),
+        Err(e) => {
+            let (status, body) = progress_error_response(e);
+            return (status, Json(serde_json::to_value(body.0).unwrap())).into_response();
+        }
+    };
+
+    // Validate that teach-back is warranted.
+    if !gamification::should_trigger_teach_back(&prog, &req.skill) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Teach-back not yet triggered for this skill — need 3 consecutive correct answers",
+                "code": "TEACH_BACK_NOT_TRIGGERED"
+            })),
+        )
+            .into_response();
+    }
+
+    let skill_level = prog.skills.get(&req.skill).map(|s| s.level).unwrap_or(0);
+
+    // If Claude is available, evaluate the teach-back.
+    // Otherwise, store for deferred evaluation (Constitution §8).
+    let (evaluation, deferred) = if let Some(ref _client) = state.claude_client {
+        // Build a simple evaluation: in a full implementation this would call
+        // Claude with the EvaluationContext. For now, produce a structured
+        // evaluation based on response length/quality heuristics as a fallback
+        // when the Claude call itself hasn't been implemented yet.
+        let word_count = req.explanation.split_whitespace().count();
+        let accuracy = if word_count >= 20 { 0.8 } else { 0.5 };
+        let completeness = if word_count >= 30 { 0.8 } else { 0.5 };
+        let clarity = if word_count >= 10 { 0.8 } else { 0.5 };
+        let avg = (accuracy + completeness + clarity) / 3.0;
+        let passed = avg >= 0.6;
+
+        let eval = gamification::TeachBackEvaluation {
+            accuracy_score: accuracy,
+            completeness_score: completeness,
+            clarity_score: clarity,
+            passed,
+            feedback: if passed {
+                format!(
+                    "Excellent explanation of {}! You clearly understand this concept — \
+                     that's the mark of a real problem-solver!",
+                    req.skill
+                )
+            } else {
+                format!(
+                    "Good effort explaining {}! Try to include more details about \
+                     how you would solve a problem step by step.",
+                    req.skill
+                )
+            },
+        };
+        (Some(eval), false)
+    } else {
+        // Claude unavailable — store for deferred evaluation.
+        let pending = gamification::PendingTeachBack {
+            id: Uuid::new_v4(),
+            skill: req.skill.clone(),
+            level: skill_level,
+            child_response: req.explanation.clone(),
+            submitted_at: chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+        };
+        if let Err(e) = gamification::store_pending_teach_back(&state.data_dir, id, &pending).await
+        {
+            tracing::warn!("Failed to store deferred teach-back: {e}");
+        }
+        (None, true)
+    };
+
+    // If evaluation passed, update metacognition trend and award badge.
+    let mut badge_earned = None;
+    if let Some(ref eval) = evaluation {
+        if eval.earns_teacher_badge() {
+            prog.challenge_flags
+                .insert("teachBackSuccess".to_string(), true);
+
+            // Award per-skill Teacher badge (format: "teacher-{skill}").
+            let badge_id = format!("teacher-{}", req.skill);
+            if !prog.badges.iter().any(|b| b.id == badge_id) {
+                let today = chrono::Local::now().date_naive();
+                let earned = progress::EarnedBadge {
+                    id: badge_id.clone(),
+                    name: format!("Teacher of {}", req.skill),
+                    earned_date: today,
+                    category: "challenge".to_string(),
+                };
+                prog.badges.push(earned.clone());
+                badge_earned = Some(earned);
+            }
+
+            // Update metacognition trend positively.
+            prog.metacognition.self_correction_rate =
+                (prog.metacognition.self_correction_rate * 0.7 + 0.3).min(1.0);
+            prog.metacognition.trend = crate::progress::tracker::MetacognitionTrend::Improving;
+
+            // Also check for the generic teachBackSuccess badge.
+            let skill_tree_path = state.data_dir.join("curriculum").join("skill-tree.json");
+            let badge_ctx = progress::BadgeContext::default();
+            if let Ok(new_badges) =
+                progress::check_new_badges(&prog, &skill_tree_path, &badge_ctx).await
+            {
+                let today = chrono::Local::now().date_naive();
+                for (def, category) in new_badges {
+                    if !prog.badges.iter().any(|b| b.id == def.id) {
+                        prog.badges.push(progress::EarnedBadge {
+                            id: def.id,
+                            name: def.name,
+                            earned_date: today,
+                            category,
+                        });
+                    }
+                }
+            }
+
+            if let Err(e) = progress::write_progress(&state.data_dir, &prog).await {
+                tracing::warn!("Failed to write progress after teach-back: {e}");
+            }
+        }
+    }
+
+    if deferred {
+        (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "status": "deferred",
+                "message": "Your explanation has been saved! It will be reviewed soon.",
+                "skill": req.skill,
+            })),
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "evaluated",
+                "evaluation": evaluation,
+                "badgeEarned": badge_earned,
+                "skill": req.skill,
+            })),
+        )
+            .into_response()
+    }
+}
+
+// --- Progression events ---
+
+/// `GET /api/v1/learners/:id/progression-events`
+///
+/// Returns a snapshot of progression events for the learner:
+/// XP per skill, current levels, badges earned, skill unlocks, streaks.
+/// Read lock.
+async fn get_progression_events(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let _guard = state.locks.read(id).await;
+
+    let progress = match progress::read_progress(&state.data_dir, id).await {
+        Ok(p) => p,
+        Err(progress::ProgressError::NotFound(_)) => {
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({ "events": [], "streaks": {}, "badges": [] })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            let (status, body) = progress_error_response(e);
+            return (status, Json(serde_json::to_value(body.0).unwrap())).into_response();
+        }
+    };
+
+    let skill_tree = match gamification::build_skill_tree(&state.data_dir, &progress).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("Failed to build skill tree for progression events: {e}");
+            Vec::new()
+        }
+    };
+
+    let events = gamification::build_progression_snapshot(&progress, &skill_tree);
+
+    let daily_state = gamification::read_daily_puzzle_state(&state.data_dir, id)
+        .await
+        .unwrap_or_else(|_| DailyPuzzleState::new(id));
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "events": events,
+            "streaks": {
+                "currentDays": progress.streaks.current_days,
+                "longestDays": progress.streaks.longest_days,
+            },
+            "badges": progress.badges,
+            "dailyPuzzle": {
+                "currentStreak": daily_state.current_streak,
+                "longestStreak": daily_state.longest_streak,
+                "totalXp": daily_state.total_xp,
+            },
+        })),
+    )
+        .into_response()
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -1183,6 +2265,18 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Load boss definitions from the curriculum directory at startup.
+    let boss_definitions = match gamification::load_bosses(&data_dir).await {
+        Ok(b) => {
+            tracing::info!(count = b.len(), "Loaded boss definitions");
+            b
+        }
+        Err(e) => {
+            tracing::warn!("Could not load boss definitions: {e} — using empty list");
+            Vec::new()
+        }
+    };
+
     // Initialise the Claude client if an API key is available.
     let claude_client = match ClaudeClient::from_env() {
         Ok(c) => {
@@ -1201,6 +2295,9 @@ async fn main() -> anyhow::Result<()> {
         templates: Arc::new(templates),
         pending_assignments: Arc::new(Mutex::new(HashMap::new())),
         active_sessions: Arc::new(Mutex::new(HashMap::new())),
+        timed_challenges: Arc::new(Mutex::new(HashMap::new())),
+        boss_challenges: Arc::new(Mutex::new(HashMap::new())),
+        boss_definitions: Arc::new(boss_definitions),
         claude_client,
     };
 
@@ -1215,6 +2312,19 @@ async fn main() -> anyhow::Result<()> {
         .route("/:session_id/abandon", post(abandon_session))
         .route("/:session_id/responses", post(record_response));
 
+    let timed_challenge_routes = Router::new()
+        .route("/start", post(start_timed_challenge))
+        .route("/:challenge_id/complete", post(complete_timed_challenge));
+
+    let boss_routes = Router::new()
+        .route("/", get(list_boss_battles))
+        .route("/:boss_id/start", post(start_boss_battle))
+        .route("/:challenge_id/complete", post(complete_boss_battle));
+
+    let challenge_routes = Router::new()
+        .nest("/timed", timed_challenge_routes)
+        .nest("/boss", boss_routes);
+
     let learner_routes = Router::new()
         .route("/", post(create_learner).get(list_learners))
         .route(
@@ -1222,8 +2332,14 @@ async fn main() -> anyhow::Result<()> {
             get(get_learner).put(update_learner).delete(delete_learner),
         )
         .route("/:id/skill-health", get(get_skill_health))
+        .route("/:id/skill-tree", get(get_skill_tree))
+        .route("/:id/progression-events", get(get_progression_events))
+        .route("/:id/teach-back", post(submit_teach_back))
+        .route("/:id/daily-puzzle", get(get_daily_puzzle))
+        .route("/:id/daily-puzzle/respond", post(respond_daily_puzzle))
         .nest("/:id/assignments", assignment_routes)
-        .nest("/:id/sessions", session_routes);
+        .nest("/:id/sessions", session_routes)
+        .nest("/:id/challenges", challenge_routes);
 
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))

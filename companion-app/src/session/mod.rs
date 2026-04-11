@@ -663,9 +663,9 @@ fn infer_metacognition_trend(meta: &Metacognition) -> MetacognitionTrend {
 /// this session's updates) to determine whether today is consecutive.
 ///
 /// - No previous date → first session; streak starts at 1
-/// - Gap == 0 (same day as last session) → no change  
+/// - Gap == 0 (same day as last session) → no change
 /// - Gap == 1 (consecutive day) → increment streak
-/// - Gap > 1 → reset streak to 1
+/// - Gap > 1 → try streak shield first; reset to 1 only if no shield available
 fn update_streak_for_session(
     progress: &mut LearnerProgress,
     previous_last_date: Option<NaiveDate>,
@@ -684,8 +684,15 @@ fn update_streak_for_session(
                 // Consecutive day — increment streak.
                 progress.streaks.current_days += 1;
             } else {
-                // Gap in sessions — reset streak to 1.
-                progress.streaks.current_days = 1;
+                // Gap in sessions — try to apply the streak shield automatically.
+                // The child should never see their streak broken if a shield is available.
+                let shielded =
+                    crate::gamification::apply_streak_shield_if_available(progress, today);
+                if !shielded {
+                    // No shield available — reset streak.
+                    progress.streaks.current_days = 1;
+                }
+                // If shielded, streak stays the same (no increment for the missed day).
             }
         }
     }
@@ -1076,14 +1083,41 @@ mod tests {
         let mut session1 = sample_session(learner_id);
         session1.started_at = Local.with_ymd_and_hms(2026, 4, 2, 15, 0, 0).unwrap();
         apply_session_to_progress(&mut progress, &session1, five_days_ago);
-        progress.streaks.current_days = 5; // simulate a streak built up
+        // Simulate a streak built up, with the shield already used (so it's unavailable).
+        progress.streaks.current_days = 5;
+        progress.streaks.shield_last_used = Some(NaiveDate::from_ymd_opt(2026, 4, 1).unwrap());
 
-        // Session today (gap > 1 day → reset).
+        // Session today (gap > 1 day, no shield available → reset).
         let today = NaiveDate::from_ymd_opt(2026, 4, 7).unwrap();
         let session2 = sample_session(learner_id);
         apply_session_to_progress(&mut progress, &session2, today);
 
         assert_eq!(progress.streaks.current_days, 1);
+    }
+
+    #[test]
+    fn test_apply_session_to_progress_streak_gap_protected_by_shield() {
+        use crate::progress::tracker::LearnerProgress;
+
+        let learner_id = Uuid::new_v4();
+        let mut progress = LearnerProgress::default_for(learner_id);
+
+        // First session 5 days ago.
+        let five_days_ago = NaiveDate::from_ymd_opt(2026, 4, 2).unwrap();
+        let mut session1 = sample_session(learner_id);
+        session1.started_at = Local.with_ymd_and_hms(2026, 4, 2, 15, 0, 0).unwrap();
+        apply_session_to_progress(&mut progress, &session1, five_days_ago);
+        // Simulate a streak built up; shield has never been used.
+        progress.streaks.current_days = 5;
+
+        // Session today (gap > 1 day, shield available → streak maintained).
+        let today = NaiveDate::from_ymd_opt(2026, 4, 7).unwrap();
+        let session2 = sample_session(learner_id);
+        apply_session_to_progress(&mut progress, &session2, today);
+
+        // Shield should have been used to protect the streak.
+        assert_eq!(progress.streaks.current_days, 5);
+        assert_eq!(progress.streaks.shield_last_used, Some(today));
     }
 
     #[test]
