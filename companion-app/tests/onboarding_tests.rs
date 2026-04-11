@@ -223,10 +223,10 @@ fn test_mixed_correct_incorrect_skip() {
 
     let baselines = onboarding::compute_zpd_baselines(&results);
 
-    // pattern-recognition: solved d=2 with 0 hints
+    // pattern-recognition: solved d=2 with 0 hints; no scaffolded evidence → scaffolded = ind + 1 = 3
     let pr = baselines.get("pattern-recognition").unwrap();
     assert_eq!(pr.independent_level, 2);
-    assert!(pr.scaffolded_level >= pr.independent_level + 1);
+    assert_eq!(pr.scaffolded_level, 3);
 
     // sequential-logic: no correct → defaults
     let sl = baselines.get("sequential-logic").unwrap();

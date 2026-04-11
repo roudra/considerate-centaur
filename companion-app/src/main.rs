@@ -1692,12 +1692,28 @@ async fn complete_onboarding(
     if let Ok(prog) = progress::read_progress(&state.data_dir, learner_id).await {
         if prog.challenge_flags.get("onboardingComplete").copied().unwrap_or(false) {
             let badge = prog.badges.iter().find(|b| b.id == "onboarding-complete").cloned();
+            // Return the actual seeded ZPD baselines for the calibration skills.
+            let zpd_baselines: HashMap<String, serde_json::Value> =
+                onboarding::CALIBRATION_SKILLS
+                    .iter()
+                    .filter_map(|&skill| {
+                        prog.skills.get(skill).map(|s| {
+                            (
+                                skill.to_string(),
+                                serde_json::json!({
+                                    "independentLevel": s.zpd.independent_level,
+                                    "scaffoldedLevel": s.zpd.scaffolded_level,
+                                }),
+                            )
+                        })
+                    })
+                    .collect();
             return (
                 StatusCode::OK,
                 Json(serde_json::json!({
                     "message": "Onboarding was already completed.",
                     "badge": badge,
-                    "zpd_baselines": {}
+                    "zpdBaselines": zpd_baselines
                 })),
             )
                 .into_response();

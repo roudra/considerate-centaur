@@ -237,6 +237,11 @@ pub fn compute_zpd_baselines(results: &[CalibrationResult]) -> HashMap<String, Z
         if sc > 0 {
             // scaffoldedLevel must be at least independentLevel + 1 to preserve a ZPD gap.
             zpd.scaffolded_level = sc.max(zpd.independent_level + 1);
+        } else {
+            // No scaffolded evidence recorded, but independentLevel may have been raised.
+            // Always ensure the ZPD gap is at least 1 so the scaffold ceiling is above the
+            // child's current independent ceiling.
+            zpd.scaffolded_level = zpd.scaffolded_level.max(zpd.independent_level + 1);
         }
     }
 
@@ -443,6 +448,7 @@ mod tests {
     #[test]
     fn test_scaffolded_level_at_least_independent_plus_one() {
         // Both solved at the same difficulty with no hints.
+        // ind = 3, sc = 3 → scaffolded_level = max(3, 3+1) = 4.
         let results = vec![
             make_result("deductive-reasoning", 3, true, 0),
             make_result("deductive-reasoning", 3, true, 0),
@@ -450,7 +456,18 @@ mod tests {
         let baselines = compute_zpd_baselines(&results);
         let zpd = baselines.get("deductive-reasoning").unwrap();
         assert_eq!(zpd.independent_level, 3);
-        assert!(zpd.scaffolded_level >= zpd.independent_level + 1);
+        assert_eq!(zpd.scaffolded_level, 4);
+    }
+
+    #[test]
+    fn test_zpd_invariant_when_ind_high_and_no_scaffolded_evidence() {
+        // Solved at d=3 with 0 hints only — no scaffolded (hints-used) evidence.
+        // ind = 3, sc = 0 → scaffolded_level must be >= ind + 1 = 4.
+        let results = vec![make_result("spatial-reasoning", 3, true, 0)];
+        let baselines = compute_zpd_baselines(&results);
+        let zpd = baselines.get("spatial-reasoning").unwrap();
+        assert_eq!(zpd.independent_level, 3);
+        assert!(zpd.scaffolded_level >= 4, "scaffolded_level must be > independent_level");
     }
 
     #[test]
