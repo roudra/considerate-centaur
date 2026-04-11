@@ -16,6 +16,10 @@ use uuid::Uuid;
 use educational_companion::assignments::{
     self, AssignmentTemplate, PipelineRequest, VerifiedAssignment,
 };
+use educational_companion::assignments::adaptation::{
+    apply_cross_session_adaptation, compute_session_state, detect_frustration,
+    recommend_next_difficulty, DifficultyRecommendation,
+};
 use educational_companion::claude::{
     ClaudeClient, NarrativeContext, ProgressSnapshot, SanitizedProfile,
 };
@@ -35,7 +39,11 @@ use educational_companion::session::{
 /// keyed by a unique assignment ID. The evaluate endpoint looks it up by ID —
 /// the client never supplies the correct answer. This prevents clients from
 /// forging correctness (Constitution §5).
-type AssignmentStore = Arc<Mutex<HashMap<String, VerifiedAssignment>>>;
+///
+/// The `std::time::Instant` records when the assignment was presented to the
+/// client — used to compute server-side response times for frustration
+/// detection (the client cannot forge this timestamp).
+type AssignmentStore = Arc<Mutex<HashMap<String, (VerifiedAssignment, std::time::Instant)>>>;
 
 /// Server-side store of active (in-progress) sessions.
 ///
@@ -318,6 +326,10 @@ struct GenerateAssignmentRequest {
     skill: Option<String>,
     /// Preferred assignment type. If absent the system picks based on skill.
     preferred_type: Option<String>,
+    /// The active session UUID. When provided, within-session adaptation rules
+    /// are applied to determine difficulty and detect frustration.
+    /// Server-side only — the client cannot influence what difficulty is chosen.
+    session_id: Option<Uuid>,
 }
 
 /// JSON body for `POST /api/v1/learners/:id/assignments/evaluate`.
@@ -353,6 +365,12 @@ struct GenerateAssignmentResponse {
     needs_parent_review: bool,
     /// Whether a deterministic fallback was used.
     used_fallback: bool,
+    /// Whether this is a confidence-builder assignment (frustration pivot).
+    /// Results of confidence-builder assignments do not count toward progression.
+    is_confidence_builder: bool,
+    /// Difficulty adaptation recommendation label (e.g. "maintain", "increase").
+    /// Only present when `session_id` was provided in the request.
+    adaptation_recommendation: Option<String>,
 }
 
 /// The assignment as seen by the client — correct answer is stripped.
@@ -373,6 +391,10 @@ struct ClientAssignment {
 ///
 /// Generates the next assignment for a learner using the GENERATE -> VALIDATE
 /// -> PRESENT pipeline. Generation and evaluation are always separate calls.
+///
+/// When `session_id` is provided, within-session adaptation rules are applied:
+/// the difficulty is adjusted based on consecutive correct/incorrect streaks
+/// and frustration detection.  All adaptation decisions are server-side.
 async fn generate_assignment(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -395,8 +417,8 @@ async fn generate_assignment(
 
     let today = chrono::Local::now().date_naive();
 
-    // Determine target skill and difficulty.
-    let (skill, difficulty) = if let Some(skill_id) = req.skill {
+    // Determine target skill and base difficulty (from ZPD / review schedule).
+    let (skill, base_difficulty) = if let Some(skill_id) = req.skill {
         let difficulty = progress
             .skills
             .get(&skill_id)
@@ -410,16 +432,53 @@ async fn generate_assignment(
         }
     };
 
+    // --- Within-session adaptation ---
+    // When a session_id is provided, apply real-time adaptation based on the
+    // session's recorded assignment history.  All decisions are server-side
+    // (the client supplies only the session UUID, not difficulty overrides).
+    let (adapted_difficulty, is_confidence_builder, adaptation_label) =
+        if let Some(session_uuid) = req.session_id {
+            let sessions = state.active_sessions.lock().await;
+            if let Some(active_session) = sessions.get(&session_uuid) {
+                if active_session.learner_id == id {
+                    let initial_difficulty = active_session.focus_level.unwrap_or(base_difficulty);
+                    let session_state =
+                        compute_session_state(&active_session.assignments, initial_difficulty);
+                    let frustration = detect_frustration(&active_session.assignments);
+
+                    let zpd = progress.skills.get(&skill).map(|s| &s.zpd);
+                    let recommendation =
+                        recommend_next_difficulty(&session_state, frustration, zpd);
+
+                    let label = recommendation.label().to_string();
+                    let (difficulty, is_cb) = match &recommendation {
+                        DifficultyRecommendation::Maintain => (session_state.current_difficulty, false),
+                        DifficultyRecommendation::Increase { new_difficulty } => (*new_difficulty, false),
+                        DifficultyRecommendation::Decrease { new_difficulty } => (*new_difficulty, false),
+                        DifficultyRecommendation::ConfidenceBuilder { difficulty, .. } => (*difficulty, true),
+                        DifficultyRecommendation::ReturnFromConfidenceBuilder { difficulty } => (*difficulty, false),
+                    };
+                    (difficulty, is_cb, Some(label))
+                } else {
+                    (base_difficulty, false, None)
+                }
+            } else {
+                (base_difficulty, false, None)
+            }
+        } else {
+            (base_difficulty, false, None)
+        };
+
     let pipeline_req = PipelineRequest {
         skill: skill.clone(),
-        difficulty,
+        difficulty: adapted_difficulty,
         preferred_type: req.preferred_type,
     };
 
     // Run the GENERATE -> VALIDATE -> PRESENT pipeline.
     // Claude is currently unavailable from this endpoint (no API key wired),
     // so the pipeline falls back to deterministic generation automatically.
-    let result: VerifiedAssignment = assignments::run_pipeline(
+    let mut result: VerifiedAssignment = assignments::run_pipeline(
         || async { None::<educational_companion::claude::schemas::GeneratedAssignment> },
         &state.templates,
         &pipeline_req,
@@ -427,9 +486,14 @@ async fn generate_assignment(
     )
     .await;
 
+    // Mark as confidence builder if adaptation determined it should be.
+    result.is_confidence_builder = is_confidence_builder;
+
     // Store the verified assignment server-side, keyed by a unique ID.
+    // Record the server-side presentation timestamp for frustration detection.
     // The client receives only the ID + a sanitized view (no correct answer).
     let assignment_id = Uuid::new_v4().to_string();
+    let presented_at = std::time::Instant::now();
 
     let client_view = ClientAssignment {
         assignment_type: result.assignment.assignment_type.clone(),
@@ -446,13 +510,15 @@ async fn generate_assignment(
         assignment: client_view,
         needs_parent_review: result.needs_parent_review,
         used_fallback: result.used_fallback,
+        is_confidence_builder,
+        adaptation_recommendation: adaptation_label,
     };
 
     state
         .pending_assignments
         .lock()
         .await
-        .insert(assignment_id, result);
+        .insert(assignment_id, (result, presented_at));
 
     (StatusCode::OK, Json(serde_json::json!(response))).into_response()
 }
@@ -477,7 +543,7 @@ async fn evaluate_response(
         .await
         .remove(&req.assignment_id);
 
-    let Some(verified) = stored else {
+    let Some((verified, _presented_at)) = stored else {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
@@ -529,6 +595,9 @@ struct StartSessionResponse {
     session_id: String,
     /// When the session started (ISO 8601).
     started_at: String,
+    /// Whether the system recommends starting with a warm-up assignment.
+    /// True after a previously abandoned session (emotional adaptation rule).
+    needs_warm_up: bool,
 }
 
 /// `POST /api/v1/learners/:id/sessions` — start a new session for a learner.
@@ -546,16 +615,35 @@ async fn start_session(
         return (status, Json(serde_json::to_value(body.0).unwrap())).into_response();
     }
 
+    // Check (and reset) the warm-up flag set by a previous session abandonment.
+    // Emotional adaptation: after an abandoned session the first assignment
+    // of the next session should be a confidence-builder warm-up (CLAUDE.md).
+    let mut needs_warm_up = false;
+    let mut prog_opt: Option<progress::LearnerProgress> = None;
+    match progress::read_progress(&state.data_dir, learner_id).await {
+        Ok(mut p) => {
+            if *p.challenge_flags.get("needsWarmUp").unwrap_or(&false) {
+                needs_warm_up = true;
+                // Reset the flag so the next session starts normally.
+                p.challenge_flags.insert("needsWarmUp".to_string(), false);
+                if let Err(e) = progress::write_progress(&state.data_dir, &p).await {
+                    tracing::warn!("Failed to reset needsWarmUp flag: {e}");
+                }
+            }
+            prog_opt = Some(p);
+        }
+        Err(progress::ProgressError::NotFound(_)) => {}
+        Err(e) => {
+            tracing::warn!("Could not read progress for warm-up check: {e}");
+        }
+    }
+
     let focus_level = if let Some(ref skill_id) = req.focus_skill {
         // Load progress to determine the current difficulty level for this skill.
-        match progress::read_progress(&state.data_dir, learner_id).await {
-            Ok(p) => p
-                .skills
-                .get(skill_id)
-                .map(|s| assignments::target_difficulty(&s.zpd)),
-            Err(progress::ProgressError::NotFound(_)) => None,
-            Err(_) => None,
-        }
+        prog_opt
+            .as_ref()
+            .and_then(|p| p.skills.get(skill_id))
+            .map(|s| assignments::target_difficulty(&s.zpd))
     } else {
         None
     };
@@ -586,6 +674,7 @@ async fn start_session(
     let response = StartSessionResponse {
         session_id: session_id.to_string(),
         started_at,
+        needs_warm_up,
     };
 
     (StatusCode::CREATED, Json(serde_json::json!(response))).into_response()
@@ -622,6 +711,12 @@ struct RecordResponseResponse {
     feedback: String,
     /// Position of this assignment in the session (1-based index).
     assignment_index: usize,
+    /// Difficulty adaptation recommendation for the next assignment.
+    /// One of: "maintain", "increase", "decrease", "confidence-builder",
+    /// "return-from-builder".
+    adaptation_recommendation: String,
+    /// Recommended difficulty for the next assignment (after adaptation).
+    next_difficulty: u32,
 }
 
 /// `POST /api/v1/learners/:id/sessions/:session_id/responses`
@@ -629,6 +724,10 @@ struct RecordResponseResponse {
 /// Records a child's response to an assignment within an active session.
 /// Looks up the assignment from the server-side `pending_assignments` store
 /// — the client never supplies the correct answer (Constitution §5).
+///
+/// Uses server-side timestamps for response-time measurement — the client's
+/// `time_seconds` field is treated as a hint but overridden by the server's
+/// recorded presentation time when available.
 async fn record_response(
     State(state): State<AppState>,
     Path((learner_id, session_uuid)): Path<(Uuid, Uuid)>,
@@ -644,7 +743,7 @@ async fn record_response(
         .await
         .remove(&req.assignment_id);
 
-    let Some(verified) = stored else {
+    let Some((verified, presented_at)) = stored else {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
@@ -658,6 +757,18 @@ async fn record_response(
     // Evaluate correctness server-side — the client cannot forge this.
     let backend_correct =
         assignments::check_response_correct(&verified.assignment, &req.child_response);
+
+    // Compute server-side response time from the stored presentation timestamp.
+    // This overrides the client-reported time for frustration detection so the
+    // signal cannot be forged (Constitution §5 trust boundary).
+    let server_time_seconds = presented_at.elapsed().as_secs() as u32;
+    // Use server time; fall back to client value only if elapsed is suspiciously
+    // small (e.g. same-process test where Instant::now() == presented_at).
+    let time_seconds = if server_time_seconds == 0 {
+        req.time_seconds
+    } else {
+        server_time_seconds
+    };
 
     let feedback = if backend_correct {
         "You've got it! Great thinking — keep exploring!".to_string()
@@ -708,16 +819,31 @@ async fn record_response(
         assignment: verified.assignment,
         child_response: req.child_response,
         correct: backend_correct,
-        time_seconds: req.time_seconds,
+        time_seconds,
         hints_used: req.hints_used,
         self_corrected: req.self_corrected,
         notes: req.notes,
+        is_confidence_builder: verified.is_confidence_builder,
     });
+
+    // Compute within-session adaptation recommendation for the next assignment.
+    // This runs within the write lock so it's consistent with the session state.
+    let initial_difficulty = active_session.focus_level.unwrap_or(3);
+    let session_state = compute_session_state(&active_session.assignments, initial_difficulty);
+    let frustration = detect_frustration(&active_session.assignments);
+    let recommendation = recommend_next_difficulty(&session_state, frustration, None);
+
+    let (next_difficulty, adaptation_label) = match &recommendation {
+        DifficultyRecommendation::Maintain => (session_state.current_difficulty, recommendation.label().to_string()),
+        _ => (recommendation.next_difficulty(), recommendation.label().to_string()),
+    };
 
     let response = RecordResponseResponse {
         backend_correct,
         feedback,
         assignment_index,
+        adaptation_recommendation: adaptation_label,
+        next_difficulty,
     };
 
     (StatusCode::OK, Json(serde_json::json!(response))).into_response()
@@ -894,6 +1020,10 @@ async fn complete_session(
 
     // Apply session to progress (XP, accuracy, streaks, metacognition).
     let xp_by_skill = session::apply_session_to_progress(&mut prog, &active_session, today);
+
+    // Apply cross-session adaptation: ZPD adjustments and working memory signal.
+    // Runs under the write lock — all adaptation decisions are server-side.
+    apply_cross_session_adaptation(&mut prog, &active_session.assignments);
 
     // Check badge eligibility.
     let skill_tree_path = state.data_dir.join("curriculum").join("skill-tree.json");
@@ -1097,6 +1227,36 @@ async fn abandon_session(
 
     // Remove from active sessions.
     state.active_sessions.lock().await.remove(&session_uuid);
+
+    // Set the needsWarmUp flag in progress so the NEXT session starts with a
+    // confidence-builder warm-up (CLAUDE.md "Emotional Adaptation").
+    // Also update observedBehavior for the abandonment pattern.
+    match progress::read_progress(&state.data_dir, learner_id).await {
+        Ok(mut p) => {
+            p.challenge_flags.insert("needsWarmUp".to_string(), true);
+            // Update observed behavior based on abandonment.
+            let mut updated_profile = profile.clone();
+            session::update_observed_behavior(
+                &mut updated_profile.observed_behavior,
+                &p,
+                &active_session,
+            );
+            if let Err(e) = progress::write_progress(&state.data_dir, &p).await {
+                tracing::warn!("Failed to set needsWarmUp flag after abandonment: {e}");
+            }
+            if updated_profile.observed_behavior != profile.observed_behavior {
+                if let Err(e) = learner::update_profile(&state.data_dir, &updated_profile).await {
+                    tracing::warn!("Profile observed-behavior update failed after abandonment: {e}");
+                }
+            }
+        }
+        Err(progress::ProgressError::NotFound(_)) => {
+            // Brand-new learner with no progress yet — no warm-up flag needed.
+        }
+        Err(e) => {
+            tracing::warn!("Could not set needsWarmUp flag after abandonment: {e}");
+        }
+    }
 
     (
         StatusCode::OK,

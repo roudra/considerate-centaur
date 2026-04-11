@@ -10,6 +10,8 @@
 //
 // Generation and evaluation are always separate API operations.
 
+pub mod adaptation;
+
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -651,6 +653,10 @@ pub struct VerifiedAssignment {
     pub needs_parent_review: bool,
     /// Whether a deterministic fallback was used instead of Claude.
     pub used_fallback: bool,
+    /// Whether this was generated as a frustration-pivot confidence builder.
+    /// Confidence-builder results do not count toward difficulty progression.
+    #[serde(default)]
+    pub is_confidence_builder: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -737,6 +743,7 @@ where
                 verification_status: status,
                 needs_parent_review: review,
                 used_fallback: false,
+                is_confidence_builder: false,
             };
         }
 
@@ -762,6 +769,7 @@ where
         verification_status: status,
         needs_parent_review: review,
         used_fallback: true,
+        is_confidence_builder: false,
     }
 }
 

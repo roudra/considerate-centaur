@@ -54,7 +54,7 @@ pub struct SessionAssignment {
     pub child_response: String,
     /// Whether the backend independently determined the answer was correct.
     pub correct: bool,
-    /// Time taken to respond, in seconds.
+    /// Time taken to respond, in seconds (server-side timestamp).
     pub time_seconds: u32,
     /// Number of hints the child used before answering.
     pub hints_used: u32,
@@ -62,6 +62,10 @@ pub struct SessionAssignment {
     pub self_corrected: bool,
     /// Optional notes (e.g. from Claude's evaluation reasoning_note).
     pub notes: Option<String>,
+    /// Whether this assignment was generated as a frustration-pivot confidence builder.
+    /// Confidence-builder results are excluded from difficulty progression metrics.
+    #[serde(default)]
+    pub is_confidence_builder: bool,
 }
 
 /// An active session stored server-side in memory.
@@ -698,17 +702,39 @@ fn update_streak_for_session(
 /// Update `observedBehavior` fields in the learner profile based on emerging
 /// patterns from the metacognition data.
 ///
-/// Only updates fields that remain `Unknown` — once the system has observed a
-/// pattern it does not regress. Called by the session completion flow.
+/// Rules (CLAUDE.md "Emotional Adaptation"):
+/// - Minimum [`crate::assignments::adaptation::MIN_SESSIONS_FOR_BEHAVIOR_INFERENCE`]
+///   sessions must exist before any pattern is inferred — prevents snap judgments.
+/// - Fields are only updated when currently `Unknown` — once observed a pattern
+///   is never silently reset to `Unknown` (Constitution §3 — not permanent labels,
+///   but we change them to a new observed value, not back to Unknown).
+/// - `observedBehavior` is always updated by the session system, never by API input.
 pub fn update_observed_behavior(
     behavior: &mut crate::learner::profile::ObservedBehavior,
     progress: &LearnerProgress,
     session: &ActiveSession,
 ) {
-    use crate::learner::profile::HintUsage;
+    use crate::assignments::adaptation::{
+        detect_frustration, RAPID_RESPONSE_SECONDS, MIN_SESSIONS_FOR_BEHAVIOR_INFERENCE,
+    };
+    use crate::learner::profile::{EffortAttribution, FrustrationResponse, HintUsage};
+
+    // Require a minimum session count before making behavioral inferences.
+    // Below this threshold we leave fields as Unknown rather than guessing.
+    if progress.total_sessions < MIN_SESSIONS_FOR_BEHAVIOR_INFERENCE {
+        // Exception: disengagement from very-short abandoned sessions can be
+        // inferred sooner, as it's a safety signal (Constitution §1).
+        if session.status == SessionStatus::Abandoned
+            && session.assignments.len() < 2
+            && behavior.frustration_response == FrustrationResponse::Unknown
+        {
+            behavior.frustration_response = FrustrationResponse::Disengages;
+        }
+        return;
+    }
 
     // --- Hint usage pattern ---
-    if behavior.hint_usage == crate::learner::profile::HintUsage::Unknown {
+    if behavior.hint_usage == HintUsage::Unknown {
         let hint_rate = progress.metacognition.hint_request_rate;
         behavior.hint_usage = if hint_rate > 0.3 {
             HintUsage::Proactive
@@ -720,13 +746,52 @@ pub fn update_observed_behavior(
     }
 
     // --- Frustration response: detect "rushes" from rapid incorrect answers ---
-    if behavior.frustration_response == crate::learner::profile::FrustrationResponse::Unknown
-        && session.status == SessionStatus::Abandoned
-    {
-        // Abandoned sessions without attempting many assignments may indicate disengagement.
-        if session.assignments.len() < 2 {
-            behavior.frustration_response =
-                crate::learner::profile::FrustrationResponse::Disengages;
+    if behavior.frustration_response == FrustrationResponse::Unknown {
+        let real_assignments: Vec<&SessionAssignment> = session
+            .assignments
+            .iter()
+            .filter(|a| !a.is_confidence_builder)
+            .collect();
+
+        if !real_assignments.is_empty() {
+            // "Rushes": several rapid-wrong answers in a row (frustration → speed up).
+            let rapid_wrong = real_assignments
+                .iter()
+                .filter(|a| a.time_seconds < RAPID_RESPONSE_SECONDS && !a.correct)
+                .count();
+            let rapid_ratio = rapid_wrong as f32 / real_assignments.len() as f32;
+
+            if rapid_ratio >= 0.5 {
+                behavior.frustration_response = FrustrationResponse::Rushes;
+            } else if session.status == SessionStatus::Abandoned {
+                // Abandoned with some attempts — check for disengagement vs. slowing down.
+                if session.assignments.len() < 3 {
+                    behavior.frustration_response = FrustrationResponse::Disengages;
+                } else {
+                    // Left mid-session — "slows-down" then disengages.
+                    behavior.frustration_response = FrustrationResponse::SlowsDown;
+                }
+            } else if detect_frustration(&session.assignments) {
+                // Server-detected frustration in a completed session → perseveres
+                // (they kept going despite frustration signals).
+                behavior.frustration_response = FrustrationResponse::Perseveres;
+            }
+        }
+    }
+
+    // --- Effort attribution: process vs outcome ---
+    // Outcome-oriented: always checks the answer quickly, low self-correction rate.
+    // Process-oriented: takes time, self-corrects, uses hints thoughtfully.
+    if behavior.effort_attribution == EffortAttribution::Unknown {
+        let self_correction_rate = progress.metacognition.self_correction_rate;
+        let hint_rate = progress.metacognition.hint_request_rate;
+
+        // Process-oriented: corrects themselves AND/OR requests hints actively.
+        if self_correction_rate > 0.2 || hint_rate > 0.2 {
+            behavior.effort_attribution = EffortAttribution::ProcessOriented;
+        } else if self_correction_rate < 0.05 && hint_rate < 0.05 {
+            // Very low self-correction and no hint usage — likely outcome-focused.
+            behavior.effort_attribution = EffortAttribution::OutcomeOriented;
         }
     }
 }
@@ -790,6 +855,7 @@ mod tests {
             hints_used: 0,
             self_corrected: false,
             notes: None,
+            is_confidence_builder: false,
         }
     }
 

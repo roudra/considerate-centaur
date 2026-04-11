@@ -52,6 +52,7 @@ fn make_session_assignment(skill: &str, difficulty: u32, correct: bool) -> Sessi
         hints_used: 0,
         self_corrected: false,
         notes: None,
+        is_confidence_builder: false,
     }
 }
 
