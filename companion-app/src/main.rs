@@ -24,6 +24,7 @@ use educational_companion::learner::{
     InitialPreferences, LearnerError, LearnerProfile, ObservedBehavior,
 };
 use educational_companion::lock::LockManager;
+use educational_companion::offline;
 use educational_companion::progress;
 use educational_companion::session::{
     self, ActiveSession, SessionAssignment, SessionStatus, SharedSessionInfo,
@@ -983,6 +984,56 @@ async fn complete_session(
     // Remove the session from the active store.
     state.active_sessions.lock().await.remove(&session_uuid);
 
+    // Spawn a background task to replenish the assignment buffer.
+    // This runs after the write lock is released so it can re-acquire it.
+    // The background task is fire-and-forget — failure is logged, not propagated.
+    // A 10-second timeout is applied to the write lock acquisition to prevent
+    // the task from blocking indefinitely if another operation holds the lock.
+    {
+        let data_dir = state.data_dir.clone();
+        let templates = state.templates.clone();
+        let claude_client = state.claude_client.clone();
+        let locks = state.locks.clone();
+        let prog_clone = prog.clone();
+
+        tokio::spawn(async move {
+            // Acquire write lock with a timeout — buffer replenishment is not
+            // critical to session completion; skip rather than block indefinitely.
+            let lock_result = tokio::time::timeout(
+                tokio::time::Duration::from_secs(10),
+                locks.write(learner_id),
+            )
+            .await;
+
+            let _bg_guard = match lock_result {
+                Ok(guard) => guard,
+                Err(_) => {
+                    tracing::warn!(
+                        learner_id = %learner_id,
+                        "Background buffer replenishment skipped — could not acquire write lock within 10s"
+                    );
+                    return;
+                }
+            };
+
+            if let Err(e) = offline::replenish_buffer(
+                &data_dir,
+                learner_id,
+                &prog_clone,
+                &templates,
+                claude_client.as_ref(),
+            )
+            .await
+            {
+                tracing::warn!(
+                    learner_id = %learner_id,
+                    error = %e,
+                    "Background buffer replenishment failed — buffer unchanged"
+                );
+            }
+        });
+    }
+
     let response = CompleteSessionResponse {
         session_file_id,
         badges_earned,
@@ -1109,6 +1160,177 @@ async fn abandon_session(
         .into_response()
 }
 
+// ---------------------------------------------------------------------------
+// Buffer route handlers
+// ---------------------------------------------------------------------------
+
+/// `GET /api/v1/learners/:id/buffer` — get buffer status for a learner.
+///
+/// Returns the number of pre-verified assignments in the buffer, when they were
+/// generated, a per-skill breakdown, and the current degradation tier.
+/// Read lock: buffer status is read-only.
+async fn get_buffer_status(
+    State(state): State<AppState>,
+    Path(learner_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let _guard = state.locks.read(learner_id).await;
+
+    // Verify learner exists.
+    if let Err(e) = learner::read_profile(&state.data_dir, learner_id).await {
+        let (status, body) = learner_error_response(e);
+        return (status, Json(serde_json::to_value(body.0).unwrap())).into_response();
+    }
+
+    let buffer = offline::read_buffer(&state.data_dir, learner_id).await;
+    let tier = offline::detect_tier(state.claude_client.as_ref(), buffer.as_ref()).await;
+    let status = offline::build_buffer_status(buffer.as_ref(), tier);
+
+    (StatusCode::OK, Json(serde_json::json!(status))).into_response()
+}
+
+/// `POST /api/v1/learners/:id/buffer/replenish` — manually trigger buffer replenishment.
+///
+/// Generates fresh, pre-verified assignments and stores them in the buffer.
+/// Write lock: replenishment writes the buffer file.
+async fn replenish_buffer_handler(
+    State(state): State<AppState>,
+    Path(learner_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let _guard = state.locks.write(learner_id).await;
+
+    // Verify learner exists.
+    if let Err(e) = learner::read_profile(&state.data_dir, learner_id).await {
+        let (status, body) = learner_error_response(e);
+        return (status, Json(serde_json::to_value(body.0).unwrap())).into_response();
+    }
+
+    // Load progress to determine skill priorities.
+    let prog = match progress::read_progress(&state.data_dir, learner_id).await {
+        Ok(p) => p,
+        Err(progress::ProgressError::NotFound(_)) => {
+            progress::LearnerProgress::default_for(learner_id)
+        }
+        Err(e) => {
+            let (status, body) = progress_error_response(e);
+            return (status, Json(serde_json::to_value(body.0).unwrap())).into_response();
+        }
+    };
+
+    match offline::replenish_buffer(
+        &state.data_dir,
+        learner_id,
+        &prog,
+        &state.templates,
+        state.claude_client.as_ref(),
+    )
+    .await
+    {
+        Ok(()) => {
+            let buffer = offline::read_buffer(&state.data_dir, learner_id).await;
+            let count = buffer.as_ref().map(|b| b.fresh_count()).unwrap_or(0);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "replenished",
+                    "count": count,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("Buffer replenishment failed: {e}"),
+                "code": "BUFFER_REPLENISH_ERROR"
+            })),
+        )
+            .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sync route handler
+// ---------------------------------------------------------------------------
+
+/// `POST /api/v1/learners/:id/sync` — retroactively sync offline sessions.
+///
+/// Finds sessions whose behavioral observations are missing (written when Claude
+/// was unavailable) and generates them retroactively. Only adds missing content —
+/// never overwrites session data recorded during the session.
+/// Write lock: sync writes to session markdown files.
+async fn sync_offline_sessions(
+    State(state): State<AppState>,
+    Path(learner_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let _guard = state.locks.write(learner_id).await;
+
+    // Verify learner exists.
+    if let Err(e) = learner::read_profile(&state.data_dir, learner_id).await {
+        let (status, body) = learner_error_response(e);
+        return (status, Json(serde_json::to_value(body.0).unwrap())).into_response();
+    }
+
+    let Some(ref client) = state.claude_client else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "Claude API not configured — cannot sync offline sessions",
+                "code": "CLAUDE_UNAVAILABLE"
+            })),
+        )
+            .into_response();
+    };
+
+    let sessions_to_sync =
+        offline::find_sessions_needing_sync(&state.data_dir, learner_id).await;
+
+    if sessions_to_sync.is_empty() {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "no_sync_needed",
+                "synced": 0
+            })),
+        )
+            .into_response();
+    }
+
+    let mut synced = 0usize;
+    let mut failed: Vec<String> = Vec::new();
+
+    for session_id in &sessions_to_sync {
+        match offline::sync_session(&state.data_dir, learner_id, session_id, client).await {
+            Ok(()) => {
+                synced += 1;
+                tracing::info!(
+                    learner_id = %learner_id,
+                    session_id,
+                    "Session synced successfully"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    learner_id = %learner_id,
+                    session_id,
+                    error = %e,
+                    "Session sync failed"
+                );
+                failed.push(session_id.clone());
+            }
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "sync_complete",
+            "synced": synced,
+            "failed": failed,
+        })),
+    )
+        .into_response()
+}
+
 /// `GET /api/v1/learners/:id/sessions` — list session history for a learner.
 ///
 /// Returns metadata only (dates, skills, accuracy) — no full assignment logs.
@@ -1222,6 +1444,9 @@ async fn main() -> anyhow::Result<()> {
             get(get_learner).put(update_learner).delete(delete_learner),
         )
         .route("/:id/skill-health", get(get_skill_health))
+        .route("/:id/buffer", get(get_buffer_status))
+        .route("/:id/buffer/replenish", post(replenish_buffer_handler))
+        .route("/:id/sync", post(sync_offline_sessions))
         .nest("/:id/assignments", assignment_routes)
         .nest("/:id/sessions", session_routes);
 

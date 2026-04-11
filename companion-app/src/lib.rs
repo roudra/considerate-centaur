@@ -4,5 +4,6 @@ pub mod claude;
 pub mod dashboard;
 pub mod learner;
 pub mod lock;
+pub mod offline;
 pub mod progress;
 pub mod session;
