@@ -1,6 +1,6 @@
 use anyhow::Context;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -19,6 +19,7 @@ use educational_companion::assignments::{
 use educational_companion::claude::{
     ClaudeClient, NarrativeContext, ProgressSnapshot, SanitizedProfile,
 };
+use educational_companion::dashboard;
 use educational_companion::learner;
 use educational_companion::learner::{
     InitialPreferences, LearnerError, LearnerProfile, ObservedBehavior,
@@ -27,7 +28,7 @@ use educational_companion::lock::LockManager;
 use educational_companion::offline;
 use educational_companion::progress;
 use educational_companion::session::{
-    self, ActiveSession, SessionAssignment, SessionStatus, SharedSessionInfo,
+    self, ActiveSession, SessionAssignment, SessionListParams, SessionStatus, SharedSessionInfo,
 };
 
 /// Server-side store of verified assignments awaiting child responses.
@@ -713,6 +714,7 @@ async fn record_response(
         hints_used: req.hints_used,
         self_corrected: req.self_corrected,
         notes: req.notes,
+        needs_parent_review: verified.needs_parent_review,
     });
 
     let response = RecordResponseResponse {
@@ -978,6 +980,26 @@ async fn complete_session(
     if updated_profile.observed_behavior != profile.observed_behavior {
         if let Err(e) = learner::update_profile(&state.data_dir, &updated_profile).await {
             tracing::warn!("Profile observed-behavior update failed: {e}");
+        }
+    }
+
+    // Add review queue items for any assignments flagged for parent review.
+    // We do this after writing the markdown so we know the file-based session ID.
+    for sa in active_session
+        .assignments
+        .iter()
+        .filter(|a| a.needs_parent_review)
+    {
+        let item = dashboard::new_review_item(
+            &session_file_id,
+            &sa.assignment.assignment_type,
+            &sa.assignment.prompt,
+            &sa.child_response,
+            sa.notes.as_deref().unwrap_or(""),
+            "medium",
+        );
+        if let Err(e) = dashboard::add_review_item(&state.data_dir, learner_id, item).await {
+            tracing::warn!("Failed to write review queue item for session {session_file_id}: {e}");
         }
     }
 
@@ -1331,19 +1353,44 @@ async fn sync_offline_sessions(
         .into_response()
 }
 
+/// Query parameters for `GET /api/v1/learners/:id/sessions`.
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct SessionHistoryQuery {
+    /// 1-based page number (default: 1).
+    #[serde(default = "default_page")]
+    page: usize,
+    /// Items per page (default: 20, maximum 100).
+    #[serde(default = "default_per_page")]
+    per_page: usize,
+}
+
+fn default_page() -> usize {
+    1
+}
+fn default_per_page() -> usize {
+    20
+}
+
 /// `GET /api/v1/learners/:id/sessions` — list session history for a learner.
 ///
-/// Returns metadata only (dates, skills, accuracy) — no full assignment logs.
+/// Returns paginated metadata only (dates, skills, accuracy, flags) — no full
+/// assignment logs. Supports `page` and `perPage` query parameters.
 /// Read lock: session history is read-only.
 async fn list_session_history(
     State(state): State<AppState>,
     Path(learner_id): Path<Uuid>,
+    Query(query): Query<SessionHistoryQuery>,
 ) -> impl IntoResponse {
     let _guard = state.locks.read(learner_id).await;
 
-    let metadata = session::list_sessions(&state.data_dir, learner_id).await;
+    let params = SessionListParams {
+        page: query.page,
+        per_page: query.per_page,
+    };
+    let result = session::list_sessions(&state.data_dir, learner_id, params).await;
 
-    (StatusCode::OK, Json(serde_json::json!(metadata))).into_response()
+    (StatusCode::OK, Json(serde_json::json!(result))).into_response()
 }
 
 /// `GET /api/v1/learners/:id/sessions/:session_id` — get a full session markdown.
@@ -1379,6 +1426,356 @@ async fn get_session_markdown(
             })),
         )
             .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard route handlers
+// ---------------------------------------------------------------------------
+
+/// `GET /api/v1/learners/:id/dashboard/overview`
+///
+/// Returns a combined snapshot: learner info, streaks, recent badges, skill
+/// radar, ZPD visualization, and session totals. Never exposes `learnerId`
+/// or UUIDs (Constitution §4, §6).
+/// Read lock: read-only view of profile and progress.
+async fn get_dashboard_overview(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let _guard = state.locks.read(id).await;
+
+    // Load profile — required.
+    let profile = match learner::read_profile(&state.data_dir, id).await {
+        Ok(p) => p,
+        Err(e) => {
+            let (status, body) = learner_error_response(e);
+            return (status, Json(serde_json::to_value(body.0).unwrap())).into_response();
+        }
+    };
+
+    // Load progress — gracefully defaults for new learners with no progress.json yet.
+    let prog = match progress::read_progress(&state.data_dir, id).await {
+        Ok(p) => p,
+        Err(progress::ProgressError::NotFound(_)) => progress::LearnerProgress::default_for(id),
+        Err(e) => {
+            let (status, body) = progress_error_response(e);
+            return (status, Json(serde_json::to_value(body.0).unwrap())).into_response();
+        }
+    };
+
+    // Build skill radar — one entry per skill (sorted for deterministic output).
+    let mut skill_radar: Vec<dashboard::SkillRadarEntry> = prog
+        .skills
+        .iter()
+        .map(|(skill_id, s)| dashboard::SkillRadarEntry {
+            skill_id: skill_id.clone(),
+            level: s.level,
+            xp: s.xp,
+        })
+        .collect();
+    skill_radar.sort_by(|a, b| a.skill_id.cmp(&b.skill_id));
+
+    // Build ZPD visualization — gap computed at runtime (never stored, Constitution §7).
+    let mut zpd_visualization: Vec<dashboard::ZpdVisualizationEntry> = prog
+        .skills
+        .iter()
+        .map(|(skill_id, s)| dashboard::ZpdVisualizationEntry {
+            skill_id: skill_id.clone(),
+            independent_level: s.zpd.independent_level,
+            scaffolded_level: s.zpd.scaffolded_level,
+            gap: s.zpd.gap(),
+        })
+        .collect();
+    zpd_visualization.sort_by(|a, b| a.skill_id.cmp(&b.skill_id));
+
+    // Return only the 5 most recently earned badges.
+    let recent_badges: Vec<progress::EarnedBadge> =
+        prog.badges.iter().rev().take(5).cloned().collect();
+
+    let overview = dashboard::DashboardOverview {
+        name: profile.name,
+        age: profile.age,
+        interests: profile.interests,
+        current_streak_days: prog.streaks.current_days,
+        longest_streak_days: prog.streaks.longest_days,
+        recent_badges,
+        skill_radar,
+        zpd_visualization,
+        total_sessions: prog.total_sessions,
+        total_time_minutes: prog.total_time_minutes,
+        total_assignments: prog.total_assignments,
+    };
+
+    (StatusCode::OK, Json(serde_json::json!(overview))).into_response()
+}
+
+/// `GET /api/v1/learners/:id/dashboard/skill/:skill_id`
+///
+/// Returns detailed data for a single skill: level, XP, ZPD (gap computed at
+/// runtime), recent accuracy, working memory signal, and spaced-repetition health.
+/// Read lock: read-only view of progress.
+async fn get_skill_detail(
+    State(state): State<AppState>,
+    Path((id, skill_id)): Path<(Uuid, String)>,
+) -> impl IntoResponse {
+    let _guard = state.locks.read(id).await;
+
+    let prog = match progress::read_progress(&state.data_dir, id).await {
+        Ok(p) => p,
+        Err(progress::ProgressError::NotFound(_)) => progress::LearnerProgress::default_for(id),
+        Err(e) => {
+            let (status, body) = progress_error_response(e);
+            return (status, Json(serde_json::to_value(body.0).unwrap())).into_response();
+        }
+    };
+
+    let skill = match prog.skills.get(&skill_id) {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": format!("Skill not found: {}", skill_id),
+                    "code": "SKILL_NOT_FOUND"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let today = chrono::Local::now().date_naive();
+    let health = progress::classify_skill_health(&skill.spaced_repetition, today);
+
+    // XP needed to reach the next level (0 at max level 10).
+    // Formula: level = floor(xp/100) + 1, so next level boundary = level * 100.
+    let xp_to_next_level = if skill.level >= 10 {
+        0
+    } else {
+        (skill.level * 100).saturating_sub(skill.xp)
+    };
+
+    let detail = dashboard::SkillDetailView {
+        skill_id: skill_id.clone(),
+        level: skill.level,
+        xp: skill.xp,
+        xp_to_next_level,
+        independent_level: skill.zpd.independent_level,
+        scaffolded_level: skill.zpd.scaffolded_level,
+        zpd_gap: skill.zpd.gap(), // computed at runtime
+        recent_accuracy: skill.recent_accuracy.clone(),
+        recent_accuracy_fraction: skill.recent_accuracy_fraction(),
+        working_memory_signal: skill.working_memory_signal.clone(),
+        spaced_repetition_health: health,
+        last_practiced: skill.last_practiced.map(|d| d.to_string()),
+    };
+
+    (StatusCode::OK, Json(serde_json::json!(detail))).into_response()
+}
+
+/// `GET /api/v1/learners/:id/dashboard/behavioral-insights`
+///
+/// Returns observed behavioral dimensions (from the profile), metacognition
+/// metrics (from progress), and recent session behavioral observations.
+/// Missing session files are silently skipped — partial data preferred.
+/// Read lock: read-only view of profile, progress, and session files.
+async fn get_behavioral_insights(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let _guard = state.locks.read(id).await;
+
+    let profile = match learner::read_profile(&state.data_dir, id).await {
+        Ok(p) => p,
+        Err(e) => {
+            let (status, body) = learner_error_response(e);
+            return (status, Json(serde_json::to_value(body.0).unwrap())).into_response();
+        }
+    };
+
+    let prog = match progress::read_progress(&state.data_dir, id).await {
+        Ok(p) => p,
+        Err(progress::ProgressError::NotFound(_)) => progress::LearnerProgress::default_for(id),
+        Err(e) => {
+            let (status, body) = progress_error_response(e);
+            return (status, Json(serde_json::to_value(body.0).unwrap())).into_response();
+        }
+    };
+
+    // Load recent session summaries (up to 3) for behavioral observations.
+    // Missing or corrupt session files are handled gracefully by load_session_summaries.
+    let summaries = session::load_session_summaries(&state.data_dir, id, 3).await;
+    let recent_observations: Vec<dashboard::SessionObservation> = summaries
+        .into_iter()
+        .map(|s| dashboard::SessionObservation {
+            session_date: s.date,
+            observations: s.behavioral_observations,
+            continuity_notes: s.continuity_notes,
+        })
+        .collect();
+
+    let insights = dashboard::BehavioralInsightsView {
+        frustration_response: profile.observed_behavior.frustration_response,
+        effort_attribution: profile.observed_behavior.effort_attribution,
+        hint_usage: profile.observed_behavior.hint_usage,
+        optimal_session_minutes: profile
+            .observed_behavior
+            .attention_pattern
+            .optimal_session_minutes,
+        accuracy_decay_onset: profile
+            .observed_behavior
+            .attention_pattern
+            .accuracy_decay_onset,
+        self_correction_rate: prog.metacognition.self_correction_rate,
+        hint_request_rate: prog.metacognition.hint_request_rate,
+        metacognition_trend: prog.metacognition.trend,
+        recent_observations,
+    };
+
+    (StatusCode::OK, Json(serde_json::json!(insights))).into_response()
+}
+
+/// `GET /api/v1/learners/:id/dashboard/review-queue`
+///
+/// Returns only pending review items (confirmed and overridden items are
+/// not surfaced — they're already resolved).
+/// Read lock: read-only view of the review queue file.
+async fn get_review_queue(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let _guard = state.locks.read(id).await;
+
+    let queue = match dashboard::read_review_queue(&state.data_dir, id).await {
+        Ok(q) => q,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("Failed to read review queue: {e}"),
+                    "code": "REVIEW_QUEUE_ERROR"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // Return only pending items — already-resolved items are not shown.
+    let pending: Vec<&dashboard::ReviewQueueItem> = queue
+        .items
+        .iter()
+        .filter(|item| item.status == dashboard::ReviewStatus::Pending)
+        .collect();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "items": pending,
+            "total": pending.len()
+        })),
+    )
+        .into_response()
+}
+
+/// JSON body for `POST /api/v1/learners/:id/dashboard/review-queue/:item_id`.
+///
+/// Only the parent's decision and optional notes can be set — assignment content,
+/// correct answer, and Claude's assessment are immutable (Constitution §5).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewDecisionRequest {
+    /// The parent's decision: `"confirmed"`, `"overridden"`, or `"discuss"`.
+    decision: String,
+    /// Optional notes explaining the decision.
+    #[serde(default)]
+    notes: Option<String>,
+}
+
+/// `POST /api/v1/learners/:id/dashboard/review-queue/:item_id`
+///
+/// Apply a parent decision (confirm / override / discuss) to a review queue item.
+/// Only modifies `status` and `parentNotes` — all other fields are immutable.
+/// Write lock: modifies the review queue file.
+async fn update_review_item(
+    State(state): State<AppState>,
+    Path((id, item_id)): Path<(Uuid, String)>,
+    Json(req): Json<ReviewDecisionRequest>,
+) -> impl IntoResponse {
+    // Write lock: read-modify-write on the review queue.
+    let _guard = state.locks.write(id).await;
+
+    let new_status = match req.decision.as_str() {
+        "confirmed" => dashboard::ReviewStatus::Confirmed,
+        "overridden" => dashboard::ReviewStatus::Overridden,
+        "discuss" => dashboard::ReviewStatus::Discuss,
+        other => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!("Invalid decision: '{}'. Must be 'confirmed', 'overridden', or 'discuss'", other),
+                    "code": "INVALID_DECISION"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let mut queue = match dashboard::read_review_queue(&state.data_dir, id).await {
+        Ok(q) => q,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("Failed to read review queue: {e}"),
+                    "code": "REVIEW_QUEUE_ERROR"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // Find the item by ID — only status and parentNotes can be changed.
+    // Collect the data we need before releasing the mutable borrow.
+    let item_index = queue.items.iter().position(|i| i.id == item_id);
+
+    match item_index {
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!("Review item not found: {}", item_id),
+                "code": "REVIEW_ITEM_NOT_FOUND"
+            })),
+        )
+            .into_response(),
+        Some(idx) => {
+            queue.items[idx].status = new_status;
+            queue.items[idx].parent_notes = req.notes;
+
+            // Capture the response fields before writing (avoids borrow-after-write).
+            let resp_id = queue.items[idx].id.clone();
+            let resp_status = queue.items[idx].status.clone();
+            let resp_notes = queue.items[idx].parent_notes.clone();
+
+            match dashboard::write_review_queue(&state.data_dir, id, &queue).await {
+                Ok(_) => (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "id": resp_id,
+                        "status": resp_status,
+                        "parentNotes": resp_notes
+                    })),
+                )
+                    .into_response(),
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!("Failed to write review queue: {e}"),
+                        "code": "REVIEW_QUEUE_WRITE_ERROR"
+                    })),
+                )
+                    .into_response(),
+            }
+        }
     }
 }
 
@@ -1437,6 +1834,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/:session_id/abandon", post(abandon_session))
         .route("/:session_id/responses", post(record_response));
 
+    let dashboard_routes = Router::new()
+        .route("/overview", get(get_dashboard_overview))
+        .route("/skill/:skill_id", get(get_skill_detail))
+        .route("/behavioral-insights", get(get_behavioral_insights))
+        .route("/review-queue", get(get_review_queue))
+        .route("/review-queue/:item_id", post(update_review_item));
+
     let learner_routes = Router::new()
         .route("/", post(create_learner).get(list_learners))
         .route(
@@ -1448,7 +1852,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/:id/buffer/replenish", post(replenish_buffer_handler))
         .route("/:id/sync", post(sync_offline_sessions))
         .nest("/:id/assignments", assignment_routes)
-        .nest("/:id/sessions", session_routes);
+        .nest("/:id/sessions", session_routes)
+        .nest("/:id/dashboard", dashboard_routes);
 
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))

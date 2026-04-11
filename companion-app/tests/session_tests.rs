@@ -10,7 +10,8 @@ use educational_companion::progress;
 /// - Progress updates on session completion
 /// - Listing and reading session files
 use educational_companion::session::{
-    self, ActiveSession, SessionAssignment, SessionMarkdownParams, SessionStatus, SharedSessionInfo,
+    self, ActiveSession, SessionAssignment, SessionListParams, SessionMarkdownParams,
+    SessionStatus, SharedSessionInfo,
 };
 
 use chrono::{Local, NaiveDate, TimeZone};
@@ -52,6 +53,7 @@ fn make_session_assignment(skill: &str, difficulty: u32, correct: bool) -> Sessi
         hints_used: 0,
         self_corrected: false,
         notes: None,
+        needs_parent_review: false,
     }
 }
 
@@ -314,8 +316,9 @@ async fn test_list_sessions_empty_when_no_sessions() {
     let dir = TempDir::new().unwrap();
     let learner_id = Uuid::new_v4();
 
-    let sessions = session::list_sessions(dir.path(), learner_id).await;
-    assert!(sessions.is_empty());
+    let sessions =
+        session::list_sessions(dir.path(), learner_id, SessionListParams::default()).await;
+    assert!(sessions.items.is_empty());
 }
 
 #[tokio::test]
@@ -337,10 +340,11 @@ async fn test_list_sessions_parses_metadata() {
         .await
         .unwrap();
 
-    let sessions = session::list_sessions(dir.path(), learner_id).await;
-    assert_eq!(sessions.len(), 1);
+    let sessions =
+        session::list_sessions(dir.path(), learner_id, SessionListParams::default()).await;
+    assert_eq!(sessions.items.len(), 1);
 
-    let meta = &sessions[0];
+    let meta = &sessions.items[0];
     assert_eq!(meta.session_id, "session-2026-04-07-1530");
     assert_eq!(meta.date, "2026-04-07");
     assert_eq!(meta.total_assignments, 4);

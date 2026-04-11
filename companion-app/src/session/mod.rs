@@ -62,6 +62,9 @@ pub struct SessionAssignment {
     pub self_corrected: bool,
     /// Optional notes (e.g. from Claude's evaluation reasoning_note).
     pub notes: Option<String>,
+    /// Whether this assignment was flagged for parent review at generation time.
+    #[serde(default)]
+    pub needs_parent_review: bool,
 }
 
 /// An active session stored server-side in memory.
@@ -119,6 +122,39 @@ pub struct SessionMetadata {
     pub total_assignments: usize,
     /// Number of assignments answered correctly.
     pub correct_assignments: usize,
+    /// Whether the session was recorded while offline (Claude was unavailable).
+    pub is_offline: bool,
+    /// Whether the session was a parent co-solve (shared) session.
+    pub is_shared: bool,
+}
+
+/// Pagination parameters for `list_sessions`.
+#[derive(Clone, Debug)]
+pub struct SessionListParams {
+    /// 1-based page number (default: 1).
+    pub page: usize,
+    /// Items per page (default: 20, maximum: 100).
+    pub per_page: usize,
+}
+
+impl Default for SessionListParams {
+    fn default() -> Self {
+        Self {
+            page: 1,
+            per_page: 20,
+        }
+    }
+}
+
+/// Paginated response wrapper for session listings.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaginatedSessions {
+    pub items: Vec<SessionMetadata>,
+    pub total: usize,
+    pub page: usize,
+    pub per_page: usize,
+    pub total_pages: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -477,13 +513,31 @@ fn extract_section(content: &str, header: &str) -> Option<String> {
 /// List completed session files for a learner (most recent first).
 ///
 /// Reads the `sessions/` directory, parses each markdown file's header and
-/// summary, and returns a list of [`SessionMetadata`] for the parent dashboard.
-pub async fn list_sessions(data_dir: &Path, learner_id: Uuid) -> Vec<SessionMetadata> {
+/// summary, and returns a paginated list of [`SessionMetadata`] for the parent dashboard.
+///
+/// Missing or unparseable files are silently skipped — partial data is preferred
+/// over an error (issue requirement: "return partial data, not errors").
+///
+/// `params` controls pagination. Pass [`SessionListParams::default`] to retrieve
+/// the first 20 sessions.
+pub async fn list_sessions(
+    data_dir: &Path,
+    learner_id: Uuid,
+    params: SessionListParams,
+) -> PaginatedSessions {
     let dir = sessions_dir(data_dir, learner_id);
 
     let mut entries = match tokio::fs::read_dir(&dir).await {
         Ok(e) => e,
-        Err(_) => return Vec::new(),
+        Err(_) => {
+            return PaginatedSessions {
+                items: Vec::new(),
+                total: 0,
+                page: params.page,
+                per_page: params.per_page,
+                total_pages: 0,
+            };
+        }
     };
 
     let mut filenames: Vec<String> = Vec::new();
@@ -497,17 +551,45 @@ pub async fn list_sessions(data_dir: &Path, learner_id: Uuid) -> Vec<SessionMeta
     filenames.sort();
     filenames.reverse(); // Most recent first.
 
-    let mut metadata = Vec::new();
+    let mut all_metadata: Vec<SessionMetadata> = Vec::new();
     for filename in &filenames {
         let path = dir.join(filename);
-        if let Ok(content) = tokio::fs::read_to_string(&path).await {
-            if let Some(meta) = parse_session_metadata(&content, filename) {
-                metadata.push(meta);
+        match tokio::fs::read_to_string(&path).await {
+            Ok(content) => {
+                if let Some(meta) = parse_session_metadata(&content, filename) {
+                    all_metadata.push(meta);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Skipping session file {:?}: {}", path, e);
             }
         }
     }
 
-    metadata
+    let total = all_metadata.len();
+    let per_page = params.per_page.clamp(1, 100);
+    let page = params.page.max(1);
+    // When total == 0, total_pages is 0 (no pages to fetch).
+    let total_pages = total.div_ceil(per_page);
+
+    let start = (page - 1) * per_page;
+    let items = if start >= total {
+        Vec::new()
+    } else {
+        all_metadata
+            .into_iter()
+            .skip(start)
+            .take(per_page)
+            .collect()
+    };
+
+    PaginatedSessions {
+        items,
+        total,
+        page,
+        per_page,
+        total_pages,
+    }
 }
 
 /// Parse [`SessionMetadata`] from a session markdown file's content.
@@ -544,6 +626,15 @@ fn parse_session_metadata(content: &str, filename: &str) -> Option<SessionMetada
         0.0
     };
 
+    // Detect offline session: the offline placeholder appears in the file
+    // when Claude was unavailable during session completion.
+    let is_offline = content.contains(
+        "*(Behavioral observations unavailable — Claude API was not available during this session.",
+    );
+
+    // Detect shared/co-solve session: the shared section header is present.
+    let is_shared = content.contains("## Shared Session:");
+
     Some(SessionMetadata {
         session_id: stem.to_string(),
         date,
@@ -551,6 +642,8 @@ fn parse_session_metadata(content: &str, filename: &str) -> Option<SessionMetada
         accuracy,
         total_assignments,
         correct_assignments,
+        is_offline,
+        is_shared,
     })
 }
 
@@ -790,6 +883,7 @@ mod tests {
             hints_used: 0,
             self_corrected: false,
             notes: None,
+            needs_parent_review: false,
         }
     }
 
