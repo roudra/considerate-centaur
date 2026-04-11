@@ -24,6 +24,7 @@ use educational_companion::learner::{
     InitialPreferences, LearnerError, LearnerProfile, ObservedBehavior,
 };
 use educational_companion::lock::LockManager;
+use educational_companion::onboarding::{self, OnboardingSession};
 use educational_companion::progress;
 use educational_companion::session::{
     self, ActiveSession, SessionAssignment, SessionStatus, SharedSessionInfo,
@@ -43,6 +44,12 @@ type AssignmentStore = Arc<Mutex<HashMap<String, VerifiedAssignment>>>;
 /// abandoned. The client references sessions only by the server-assigned UUID.
 type ActiveSessionStore = Arc<Mutex<HashMap<Uuid, ActiveSession>>>;
 
+/// Server-side store of active onboarding sessions — keyed by learner UUID.
+///
+/// Created by `start_onboarding`, removed by `complete_onboarding`.
+/// The client never holds onboarding state.
+type OnboardingStore = Arc<Mutex<HashMap<Uuid, OnboardingSession>>>;
+
 /// Shared application state passed to every route handler.
 #[derive(Clone)]
 struct AppState {
@@ -54,6 +61,8 @@ struct AppState {
     pending_assignments: AssignmentStore,
     /// Server-side store of active sessions — keyed by session UUID.
     active_sessions: ActiveSessionStore,
+    /// Server-side store of active onboarding sessions — keyed by learner UUID.
+    onboarding_sessions: OnboardingStore,
     /// Optional Claude API client — `None` if `ANTHROPIC_API_KEY` is not set.
     claude_client: Option<ClaudeClient>,
 }
@@ -1160,6 +1169,625 @@ async fn get_session_markdown(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Onboarding route handlers
+// ---------------------------------------------------------------------------
+
+/// JSON body for `POST /api/v1/learners/:id/onboarding` — start onboarding.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StartOnboardingRequest {
+    /// Optional updated interest list chosen during interest-discovery step.
+    interests: Option<Vec<String>>,
+}
+
+/// Response from `POST /api/v1/learners/:id/onboarding`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StartOnboardingResponse {
+    /// Confirmation that onboarding has started (or already complete).
+    status: String,
+    /// Total number of calibration puzzles in the sequence.
+    total_puzzles: usize,
+    /// Human-readable message.
+    message: String,
+}
+
+/// `POST /api/v1/learners/:id/onboarding`
+///
+/// Starts the onboarding session for a learner.
+///
+/// - If onboarding is already complete (`challenge_flags["onboardingComplete"]`), returns
+///   the existing completion status rather than an error.
+/// - If an onboarding session is already in progress, returns its current status.
+/// - If `interests` is provided, updates the learner's profile.
+///
+/// Write lock: may update profile and creates onboarding state.
+async fn start_onboarding(
+    State(state): State<AppState>,
+    Path(learner_id): Path<Uuid>,
+    Json(req): Json<StartOnboardingRequest>,
+) -> impl IntoResponse {
+    let _guard = state.locks.write(learner_id).await;
+
+    // Verify the learner exists.
+    let mut profile = match learner::read_profile(&state.data_dir, learner_id).await {
+        Ok(p) => p,
+        Err(e) => {
+            let (status, body) = learner_error_response(e);
+            return (status, Json(serde_json::to_value(body.0).unwrap())).into_response();
+        }
+    };
+
+    // Check if onboarding has already been completed.
+    if let Ok(prog) = progress::read_progress(&state.data_dir, learner_id).await {
+        if prog.challenge_flags.get("onboardingComplete").copied().unwrap_or(false) {
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "complete",
+                    "message": "Onboarding was already completed for this learner.",
+                    "totalPuzzles": onboarding::CALIBRATION_SKILLS.len() * onboarding::PUZZLES_PER_SKILL
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    // If a session is already in progress, return its status.
+    {
+        let sessions = state.onboarding_sessions.lock().await;
+        if sessions.contains_key(&learner_id) {
+            let session = &sessions[&learner_id];
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "in-progress",
+                    "message": "Onboarding is already in progress.",
+                    "totalPuzzles": session.total_puzzles(),
+                    "puzzlesCompleted": session.current_index,
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    // Update interests if provided (interest-discovery step).
+    if let Some(interests) = req.interests {
+        if !interests.is_empty() {
+            profile.interests = interests;
+            if let Err(e) = learner::update_profile(&state.data_dir, &profile).await {
+                tracing::warn!("Failed to update interests during onboarding: {e}");
+            }
+        }
+    }
+
+    // Create and store the onboarding session.
+    let session = OnboardingSession::new(learner_id);
+    let total_puzzles = session.total_puzzles();
+    state
+        .onboarding_sessions
+        .lock()
+        .await
+        .insert(learner_id, session);
+
+    let response = StartOnboardingResponse {
+        status: "in-progress".to_string(),
+        total_puzzles,
+        message: "Let's see what kinds of puzzles you like! There's no score — just explore."
+            .to_string(),
+    };
+
+    (StatusCode::CREATED, Json(serde_json::json!(response))).into_response()
+}
+
+/// Response from `GET /api/v1/learners/:id/onboarding`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OnboardingStatusResponse {
+    status: String,
+    puzzles_completed: usize,
+    total_puzzles: usize,
+}
+
+/// `GET /api/v1/learners/:id/onboarding`
+///
+/// Returns the current onboarding status for a learner.
+///
+/// Read lock.
+async fn get_onboarding_status(
+    State(state): State<AppState>,
+    Path(learner_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let _guard = state.locks.read(learner_id).await;
+
+    // Check for completed onboarding in persisted progress.
+    if let Ok(prog) = progress::read_progress(&state.data_dir, learner_id).await {
+        if prog.challenge_flags.get("onboardingComplete").copied().unwrap_or(false) {
+            let total =
+                onboarding::CALIBRATION_SKILLS.len() * onboarding::PUZZLES_PER_SKILL;
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "complete",
+                    "puzzlesCompleted": total,
+                    "totalPuzzles": total,
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    // Check for an in-progress onboarding session.
+    let sessions = state.onboarding_sessions.lock().await;
+    if let Some(session) = sessions.get(&learner_id) {
+        let response = OnboardingStatusResponse {
+            status: match session.status() {
+                onboarding::OnboardingStatus::InProgress => "in-progress".to_string(),
+                onboarding::OnboardingStatus::PuzzlesExhausted => "puzzles-exhausted".to_string(),
+                onboarding::OnboardingStatus::Complete => "complete".to_string(),
+            },
+            puzzles_completed: session.current_index,
+            total_puzzles: session.total_puzzles(),
+        };
+        return (StatusCode::OK, Json(serde_json::json!(response))).into_response();
+    }
+
+    // Not started.
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "not-started",
+            "puzzlesCompleted": 0,
+            "totalPuzzles": onboarding::CALIBRATION_SKILLS.len() * onboarding::PUZZLES_PER_SKILL,
+        })),
+    )
+        .into_response()
+}
+
+/// Response from `POST /api/v1/learners/:id/onboarding/puzzle/generate`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CalibrationPuzzleResponse {
+    /// Assignment ID — use this when submitting a response or skipping.
+    assignment_id: String,
+    /// The puzzle as seen by the child (no correct answer).
+    assignment: ClientAssignment,
+    /// How many puzzles have been completed so far (0-based, before this one).
+    puzzle_index: usize,
+    /// Total puzzles in the calibration sequence.
+    total_puzzles: usize,
+    /// The skill being calibrated.
+    skill: String,
+}
+
+/// `POST /api/v1/learners/:id/onboarding/puzzle/generate`
+///
+/// Generates the next calibration puzzle in the onboarding sequence.
+///
+/// Falls back to deterministic generation if Claude is unavailable (Constitution §8).
+/// The client never receives the correct answer (Constitution §5).
+///
+/// Write lock: sets pending_assignment_id on the onboarding session.
+async fn generate_calibration_puzzle(
+    State(state): State<AppState>,
+    Path(learner_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let _guard = state.locks.write(learner_id).await;
+
+    // Retrieve the onboarding session.
+    let (skill, difficulty, puzzle_index, total_puzzles) = {
+        let sessions = state.onboarding_sessions.lock().await;
+        let session = match sessions.get(&learner_id) {
+            Some(s) => s,
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({
+                        "error": "No active onboarding session found. Call start first.",
+                        "code": "ONBOARDING_NOT_STARTED"
+                    })),
+                )
+                    .into_response();
+            }
+        };
+
+        if session.is_sequence_complete() {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "All calibration puzzles have been presented. Call complete to finish onboarding.",
+                    "code": "ONBOARDING_PUZZLES_EXHAUSTED"
+                })),
+            )
+                .into_response();
+        }
+
+        let (skill, difficulty) = session.current_skill_difficulty().unwrap();
+        (
+            skill.to_string(),
+            difficulty,
+            session.current_index,
+            session.total_puzzles(),
+        )
+    };
+
+    // Run the generation pipeline (Claude → fallback).
+    let pipeline_req = PipelineRequest {
+        skill: skill.clone(),
+        difficulty,
+        preferred_type: None,
+    };
+
+    let result: VerifiedAssignment = assignments::run_pipeline(
+        || async { None::<educational_companion::claude::schemas::GeneratedAssignment> },
+        &state.templates,
+        &pipeline_req,
+        2,
+    )
+    .await;
+
+    let assignment_id = Uuid::new_v4().to_string();
+
+    let client_view = ClientAssignment {
+        assignment_type: result.assignment.assignment_type.clone(),
+        skill: result.assignment.skill.clone(),
+        difficulty: result.assignment.difficulty,
+        theme: result.assignment.theme.clone(),
+        prompt: result.assignment.prompt.clone(),
+        hints: result.assignment.hints.clone(),
+        modality: result.assignment.modality.clone(),
+    };
+
+    // Store the verified assignment server-side.
+    state
+        .pending_assignments
+        .lock()
+        .await
+        .insert(assignment_id.clone(), result);
+
+    // Record the pending assignment ID in the onboarding session.
+    {
+        let mut sessions = state.onboarding_sessions.lock().await;
+        if let Some(session) = sessions.get_mut(&learner_id) {
+            session.pending_assignment_id = Some(assignment_id.clone());
+        }
+    }
+
+    let response = CalibrationPuzzleResponse {
+        assignment_id,
+        assignment: client_view,
+        puzzle_index,
+        total_puzzles,
+        skill,
+    };
+
+    (StatusCode::OK, Json(serde_json::json!(response))).into_response()
+}
+
+/// JSON body for `POST /api/v1/learners/:id/onboarding/puzzle/respond`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CalibrationRespondRequest {
+    /// The server-assigned assignment ID (from the generate endpoint).
+    assignment_id: String,
+    /// The child's free-text response.
+    child_response: String,
+    /// Number of hints the child used (affects ZPD baseline — 0 hints = independent level).
+    #[serde(default)]
+    hints_used: u32,
+    /// Time taken in seconds (informational).
+    #[serde(default)]
+    time_seconds: u32,
+}
+
+/// Response from the calibration respond endpoint.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CalibrationRespondResponse {
+    /// Encouraging feedback — no scores, no "correct/incorrect" labels.
+    feedback: String,
+    /// Whether more puzzles remain.
+    more_puzzles: bool,
+    /// How many puzzles have now been completed.
+    puzzles_completed: usize,
+    /// Total in the sequence.
+    total_puzzles: usize,
+}
+
+/// `POST /api/v1/learners/:id/onboarding/puzzle/respond`
+///
+/// Submits a child's response to the current calibration puzzle.
+///
+/// - Looks up the correct answer from the server-side store (client never supplies it).
+/// - Records correctness and adapts difficulty for the next puzzle.
+/// - Returns encouraging feedback (no scores shown — Constitution §1).
+///
+/// Write lock: modifies calibration state.
+async fn submit_calibration_response(
+    State(state): State<AppState>,
+    Path(learner_id): Path<Uuid>,
+    Json(req): Json<CalibrationRespondRequest>,
+) -> impl IntoResponse {
+    let _guard = state.locks.write(learner_id).await;
+
+    // Look up the verified assignment — client never supplies the correct answer.
+    let stored = state
+        .pending_assignments
+        .lock()
+        .await
+        .remove(&req.assignment_id);
+
+    let Some(verified) = stored else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!("Assignment not found: {}", req.assignment_id),
+                "code": "ASSIGNMENT_NOT_FOUND"
+            })),
+        )
+            .into_response();
+    };
+
+    let backend_correct =
+        assignments::check_response_correct(&verified.assignment, &req.child_response);
+
+    // Encouraging feedback — no scores, no "Correct!" or "Wrong!" labels.
+    let feedback = if backend_correct {
+        "You've got it! That was a great one to think through.".to_string()
+    } else {
+        "That's a tricky one — let's keep exploring and see what other puzzles we can try!"
+            .to_string()
+    };
+
+    // Update the onboarding session.
+    let (more_puzzles, puzzles_completed, total_puzzles) = {
+        let mut sessions = state.onboarding_sessions.lock().await;
+        let session = match sessions.get_mut(&learner_id) {
+            Some(s) => s,
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({
+                        "error": "No active onboarding session found.",
+                        "code": "ONBOARDING_NOT_STARTED"
+                    })),
+                )
+                    .into_response();
+            }
+        };
+
+        let result = onboarding::CalibrationResult {
+            skill: verified.assignment.skill.clone(),
+            difficulty: verified.assignment.difficulty,
+            correct: backend_correct,
+            hints_used: req.hints_used,
+            skipped: false,
+        };
+        session.record_result(result);
+
+        let more = !session.is_sequence_complete();
+        (more, session.current_index, session.total_puzzles())
+    };
+
+    let _ = req.time_seconds; // informational, not used for calibration
+
+    let response = CalibrationRespondResponse {
+        feedback,
+        more_puzzles,
+        puzzles_completed,
+        total_puzzles,
+    };
+
+    (StatusCode::OK, Json(serde_json::json!(response))).into_response()
+}
+
+/// JSON body for `POST /api/v1/learners/:id/onboarding/puzzle/skip`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CalibrationSkipRequest {
+    /// The server-assigned assignment ID currently pending (so the server can clean up).
+    assignment_id: Option<String>,
+}
+
+/// `POST /api/v1/learners/:id/onboarding/puzzle/skip`
+///
+/// Skips the current calibration puzzle. Every puzzle has a skip option —
+/// the child is never forced to answer (Constitution §1).
+///
+/// Write lock: modifies calibration state.
+async fn skip_calibration_puzzle(
+    State(state): State<AppState>,
+    Path(learner_id): Path<Uuid>,
+    Json(req): Json<CalibrationSkipRequest>,
+) -> impl IntoResponse {
+    let _guard = state.locks.write(learner_id).await;
+
+    // Clean up any pending assignment.
+    if let Some(ref id) = req.assignment_id {
+        state.pending_assignments.lock().await.remove(id);
+    }
+
+    let (more_puzzles, puzzles_completed, total_puzzles) = {
+        let mut sessions = state.onboarding_sessions.lock().await;
+        let session = match sessions.get_mut(&learner_id) {
+            Some(s) => s,
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({
+                        "error": "No active onboarding session found.",
+                        "code": "ONBOARDING_NOT_STARTED"
+                    })),
+                )
+                    .into_response();
+            }
+        };
+
+        if session.is_sequence_complete() {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "All calibration puzzles have already been presented.",
+                    "code": "ONBOARDING_PUZZLES_EXHAUSTED"
+                })),
+            )
+                .into_response();
+        }
+
+        session.skip_current();
+        let more = !session.is_sequence_complete();
+        (more, session.current_index, session.total_puzzles())
+    };
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "morePuzzles": more_puzzles,
+            "puzzlesCompleted": puzzles_completed,
+            "totalPuzzles": total_puzzles,
+        })),
+    )
+        .into_response()
+}
+
+/// Response from `POST /api/v1/learners/:id/onboarding/complete`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompleteOnboardingResponse {
+    /// Badge awarded for completing onboarding.
+    badge: Option<progress::EarnedBadge>,
+    /// ZPD baselines seeded for each calibration skill.
+    zpd_baselines: HashMap<String, serde_json::Value>,
+    /// Message for the child.
+    message: String,
+}
+
+/// `POST /api/v1/learners/:id/onboarding/complete`
+///
+/// Completes onboarding:
+/// 1. Computes ZPD baselines from calibration results.
+/// 2. Seeds `progress.json` with those baselines.
+/// 3. Sets `challenge_flags["onboardingComplete"] = true`.
+/// 4. Awards the "Getting Started" badge (only once).
+/// 5. Removes the onboarding session from the store.
+///
+/// Partial calibration data is acceptable — any captured results seed partial baselines.
+/// Skills not attempted fall back to defaults (independentLevel: 1, scaffoldedLevel: 2).
+///
+/// Write lock.
+async fn complete_onboarding(
+    State(state): State<AppState>,
+    Path(learner_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let _guard = state.locks.write(learner_id).await;
+
+    // Verify the learner exists.
+    if let Err(e) = learner::read_profile(&state.data_dir, learner_id).await {
+        let (status, body) = learner_error_response(e);
+        return (status, Json(serde_json::to_value(body.0).unwrap())).into_response();
+    }
+
+    // Check for idempotency — if already complete, return the current status.
+    if let Ok(prog) = progress::read_progress(&state.data_dir, learner_id).await {
+        if prog.challenge_flags.get("onboardingComplete").copied().unwrap_or(false) {
+            let badge = prog.badges.iter().find(|b| b.id == "onboarding-complete").cloned();
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "message": "Onboarding was already completed.",
+                    "badge": badge,
+                    "zpd_baselines": {}
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    // Extract calibration results from the in-progress session (if any).
+    let calibration_results: Vec<onboarding::CalibrationResult> = {
+        let mut sessions = state.onboarding_sessions.lock().await;
+        sessions
+            .remove(&learner_id)
+            .map(|s| s.results)
+            .unwrap_or_default()
+    };
+
+    // Compute ZPD baselines from whatever was captured.
+    let baselines = onboarding::compute_zpd_baselines(&calibration_results);
+
+    // Load or initialize progress.
+    let mut prog = match progress::read_progress(&state.data_dir, learner_id).await {
+        Ok(p) => p,
+        Err(progress::ProgressError::NotFound(_)) => {
+            progress::LearnerProgress::default_for(learner_id)
+        }
+        Err(e) => {
+            let (status, body) = progress_error_response(e);
+            return (status, Json(serde_json::to_value(body.0).unwrap())).into_response();
+        }
+    };
+
+    // Seed progress with ZPD baselines (non-destructive — existing skills are untouched).
+    onboarding::seed_progress_with_baselines(&mut prog, baselines.clone());
+
+    // Mark onboarding as complete.
+    prog.challenge_flags
+        .insert("onboardingComplete".to_string(), true);
+
+    // Award "Getting Started" badge if not already earned.
+    let today = chrono::Local::now().date_naive();
+    let badge_already_earned = prog.badges.iter().any(|b| b.id == "onboarding-complete");
+    let new_badge = if !badge_already_earned {
+        let badge = progress::EarnedBadge {
+            id: "onboarding-complete".to_string(),
+            name: "Getting Started".to_string(),
+            earned_date: today,
+            category: "milestone".to_string(),
+        };
+        prog.badges.push(badge.clone());
+        Some(badge)
+    } else {
+        None
+    };
+
+    // Persist progress.
+    if let Err(e) = progress::write_progress(&state.data_dir, &prog).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("Failed to save progress: {e}"),
+                "code": "PROGRESS_WRITE_ERROR"
+            })),
+        )
+            .into_response();
+    }
+
+    // Build a client-safe view of the ZPD baselines.
+    let zpd_baselines: HashMap<String, serde_json::Value> = baselines
+        .iter()
+        .map(|(skill, zpd)| {
+            (
+                skill.clone(),
+                serde_json::json!({
+                    "independentLevel": zpd.independent_level,
+                    "scaffoldedLevel": zpd.scaffolded_level,
+                }),
+            )
+        })
+        .collect();
+
+    let response = CompleteOnboardingResponse {
+        badge: new_badge,
+        zpd_baselines,
+        message:
+            "Welcome aboard! You've explored your first puzzles. Let the adventures begin!"
+                .to_string(),
+    };
+
+    (StatusCode::CREATED, Json(serde_json::json!(response))).into_response()
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -1201,6 +1829,7 @@ async fn main() -> anyhow::Result<()> {
         templates: Arc::new(templates),
         pending_assignments: Arc::new(Mutex::new(HashMap::new())),
         active_sessions: Arc::new(Mutex::new(HashMap::new())),
+        onboarding_sessions: Arc::new(Mutex::new(HashMap::new())),
         claude_client,
     };
 
@@ -1215,6 +1844,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/:session_id/abandon", post(abandon_session))
         .route("/:session_id/responses", post(record_response));
 
+    let onboarding_routes = Router::new()
+        .route("/", post(start_onboarding).get(get_onboarding_status))
+        .route("/complete", post(complete_onboarding))
+        .route("/puzzle/generate", post(generate_calibration_puzzle))
+        .route("/puzzle/respond", post(submit_calibration_response))
+        .route("/puzzle/skip", post(skip_calibration_puzzle));
+
     let learner_routes = Router::new()
         .route("/", post(create_learner).get(list_learners))
         .route(
@@ -1223,7 +1859,8 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/:id/skill-health", get(get_skill_health))
         .nest("/:id/assignments", assignment_routes)
-        .nest("/:id/sessions", session_routes);
+        .nest("/:id/sessions", session_routes)
+        .nest("/:id/onboarding", onboarding_routes);
 
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
