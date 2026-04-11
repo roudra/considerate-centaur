@@ -715,7 +715,7 @@ pub fn update_observed_behavior(
     session: &ActiveSession,
 ) {
     use crate::assignments::adaptation::{
-        detect_frustration, RAPID_RESPONSE_SECONDS, MIN_SESSIONS_FOR_BEHAVIOR_INFERENCE,
+        detect_frustration, MIN_SESSIONS_FOR_BEHAVIOR_INFERENCE, RAPID_RESPONSE_SECONDS,
     };
     use crate::learner::profile::{EffortAttribution, FrustrationResponse, HintUsage};
 

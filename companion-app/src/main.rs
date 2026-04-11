@@ -13,12 +13,12 @@ use tokio::sync::Mutex;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
-use educational_companion::assignments::{
-    self, AssignmentTemplate, PipelineRequest, VerifiedAssignment,
-};
 use educational_companion::assignments::adaptation::{
     apply_cross_session_adaptation, compute_session_state, detect_frustration,
     recommend_next_difficulty, DifficultyRecommendation,
+};
+use educational_companion::assignments::{
+    self, AssignmentTemplate, PipelineRequest, VerifiedAssignment,
 };
 use educational_companion::claude::{
     ClaudeClient, NarrativeContext, ProgressSnapshot, SanitizedProfile,
@@ -436,38 +436,46 @@ async fn generate_assignment(
     // When a session_id is provided, apply real-time adaptation based on the
     // session's recorded assignment history.  All decisions are server-side
     // (the client supplies only the session UUID, not difficulty overrides).
-    let (adapted_difficulty, is_confidence_builder, adaptation_label) =
-        if let Some(session_uuid) = req.session_id {
-            let sessions = state.active_sessions.lock().await;
-            if let Some(active_session) = sessions.get(&session_uuid) {
-                if active_session.learner_id == id {
-                    let initial_difficulty = active_session.focus_level.unwrap_or(base_difficulty);
-                    let session_state =
-                        compute_session_state(&active_session.assignments, initial_difficulty);
-                    let frustration = detect_frustration(&active_session.assignments);
+    let (adapted_difficulty, is_confidence_builder, adaptation_label) = if let Some(session_uuid) =
+        req.session_id
+    {
+        let sessions = state.active_sessions.lock().await;
+        if let Some(active_session) = sessions.get(&session_uuid) {
+            if active_session.learner_id == id {
+                let initial_difficulty = active_session.focus_level.unwrap_or(base_difficulty);
+                let session_state =
+                    compute_session_state(&active_session.assignments, initial_difficulty);
+                let frustration = detect_frustration(&active_session.assignments);
 
-                    let zpd = progress.skills.get(&skill).map(|s| &s.zpd);
-                    let recommendation =
-                        recommend_next_difficulty(&session_state, frustration, zpd);
+                let zpd = progress.skills.get(&skill).map(|s| &s.zpd);
+                let recommendation = recommend_next_difficulty(&session_state, frustration, zpd);
 
-                    let label = recommendation.label().to_string();
-                    let (difficulty, is_cb) = match &recommendation {
-                        DifficultyRecommendation::Maintain => (session_state.current_difficulty, false),
-                        DifficultyRecommendation::Increase { new_difficulty } => (*new_difficulty, false),
-                        DifficultyRecommendation::Decrease { new_difficulty } => (*new_difficulty, false),
-                        DifficultyRecommendation::ConfidenceBuilder { difficulty, .. } => (*difficulty, true),
-                        DifficultyRecommendation::ReturnFromConfidenceBuilder { difficulty } => (*difficulty, false),
-                    };
-                    (difficulty, is_cb, Some(label))
-                } else {
-                    (base_difficulty, false, None)
-                }
+                let label = recommendation.label().to_string();
+                let (difficulty, is_cb) = match &recommendation {
+                    DifficultyRecommendation::Maintain => (session_state.current_difficulty, false),
+                    DifficultyRecommendation::Increase { new_difficulty } => {
+                        (*new_difficulty, false)
+                    }
+                    DifficultyRecommendation::Decrease { new_difficulty } => {
+                        (*new_difficulty, false)
+                    }
+                    DifficultyRecommendation::ConfidenceBuilder { difficulty, .. } => {
+                        (*difficulty, true)
+                    }
+                    DifficultyRecommendation::ReturnFromConfidenceBuilder { difficulty } => {
+                        (*difficulty, false)
+                    }
+                };
+                (difficulty, is_cb, Some(label))
             } else {
                 (base_difficulty, false, None)
             }
         } else {
             (base_difficulty, false, None)
-        };
+        }
+    } else {
+        (base_difficulty, false, None)
+    };
 
     let pipeline_req = PipelineRequest {
         skill: skill.clone(),
@@ -834,8 +842,14 @@ async fn record_response(
     let recommendation = recommend_next_difficulty(&session_state, frustration, None);
 
     let (next_difficulty, adaptation_label) = match &recommendation {
-        DifficultyRecommendation::Maintain => (session_state.current_difficulty, recommendation.label().to_string()),
-        _ => (recommendation.next_difficulty(), recommendation.label().to_string()),
+        DifficultyRecommendation::Maintain => (
+            session_state.current_difficulty,
+            recommendation.label().to_string(),
+        ),
+        _ => (
+            recommendation.next_difficulty(),
+            recommendation.label().to_string(),
+        ),
     };
 
     let response = RecordResponseResponse {
@@ -1246,7 +1260,9 @@ async fn abandon_session(
             }
             if updated_profile.observed_behavior != profile.observed_behavior {
                 if let Err(e) = learner::update_profile(&state.data_dir, &updated_profile).await {
-                    tracing::warn!("Profile observed-behavior update failed after abandonment: {e}");
+                    tracing::warn!(
+                        "Profile observed-behavior update failed after abandonment: {e}"
+                    );
                 }
             }
         }

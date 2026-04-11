@@ -218,11 +218,7 @@ pub fn detect_frustration(assignments: &[SessionAssignment]) -> bool {
         return false;
     }
 
-    let window: Vec<&&SessionAssignment> = real
-        .iter()
-        .rev()
-        .take(FRUSTRATION_WINDOW)
-        .collect();
+    let window: Vec<&&SessionAssignment> = real.iter().rev().take(FRUSTRATION_WINDOW).collect();
 
     // Signal 1: long pause on an incorrect answer.
     if window
@@ -385,7 +381,12 @@ fn adapt_zpd_for_skill(skill: &mut SkillProgress, accuracy: f32) {
         // High performance → push the ceiling up to create new growth room.
         skill.zpd.scaffolded_level = (skill.zpd.scaffolded_level + 1).min(10);
         // If independent level is only 1 below scaffolded, raise independent too.
-        if skill.zpd.scaffolded_level.saturating_sub(skill.zpd.independent_level) <= 1 {
+        if skill
+            .zpd
+            .scaffolded_level
+            .saturating_sub(skill.zpd.independent_level)
+            <= 1
+        {
             skill.zpd.independent_level = (skill.zpd.independent_level + 1).min(10);
         }
     }
@@ -417,7 +418,11 @@ mod tests {
     use crate::claude::schemas::GeneratedAssignment;
     use uuid::Uuid;
 
-    fn make_assignment(correct: bool, time_seconds: u32, is_confidence_builder: bool) -> SessionAssignment {
+    fn make_assignment(
+        correct: bool,
+        time_seconds: u32,
+        is_confidence_builder: bool,
+    ) -> SessionAssignment {
         SessionAssignment {
             assignment_id: Uuid::new_v4().to_string(),
             assignment: GeneratedAssignment {
@@ -433,7 +438,11 @@ mod tests {
                 modality: None,
                 verification_data: None,
             },
-            child_response: if correct { "8".to_string() } else { "5".to_string() },
+            child_response: if correct {
+                "8".to_string()
+            } else {
+                "5".to_string()
+            },
             correct,
             time_seconds,
             hints_used: 0,
@@ -457,9 +466,8 @@ mod tests {
 
     #[test]
     fn test_three_consecutive_correct_increase_difficulty() {
-        let assignments: Vec<SessionAssignment> = (0..3)
-            .map(|_| make_assignment(true, 30, false))
-            .collect();
+        let assignments: Vec<SessionAssignment> =
+            (0..3).map(|_| make_assignment(true, 30, false)).collect();
         let state = compute_session_state(&assignments, 3);
         // Threshold reached → difficulty should have been bumped to 4, counter reset.
         assert_eq!(state.current_difficulty, 4);
@@ -551,10 +559,10 @@ mod tests {
     #[test]
     fn test_frustration_rapid_wrong_answers() {
         let assignments = vec![
-            make_assignment(false, 5, false),  // rapid wrong
-            make_assignment(false, 8, false),  // rapid wrong
-            make_assignment(true, 30, false),  // correct
-            make_assignment(false, 6, false),  // rapid wrong
+            make_assignment(false, 5, false), // rapid wrong
+            make_assignment(false, 8, false), // rapid wrong
+            make_assignment(true, 30, false), // correct
+            make_assignment(false, 6, false), // rapid wrong
         ];
         // 3 out of 4 rapid wrong = 75% ≥ threshold(50%)
         assert!(detect_frustration(&assignments));
@@ -571,9 +579,8 @@ mod tests {
 
     #[test]
     fn test_no_frustration_correct_answers() {
-        let assignments: Vec<SessionAssignment> = (0..4)
-            .map(|_| make_assignment(true, 30, false))
-            .collect();
+        let assignments: Vec<SessionAssignment> =
+            (0..4).map(|_| make_assignment(true, 30, false)).collect();
         assert!(!detect_frustration(&assignments));
     }
 
@@ -587,9 +594,8 @@ mod tests {
     #[test]
     fn test_frustration_excludes_confidence_builders() {
         // Only confidence builders — should not trigger frustration.
-        let assignments: Vec<SessionAssignment> = (0..4)
-            .map(|_| make_assignment(false, 5, true))
-            .collect();
+        let assignments: Vec<SessionAssignment> =
+            (0..4).map(|_| make_assignment(false, 5, true)).collect();
         assert!(!detect_frustration(&assignments));
     }
 
@@ -608,7 +614,10 @@ mod tests {
         };
         let rec = recommend_next_difficulty(&state, true, None);
         match rec {
-            DifficultyRecommendation::ConfidenceBuilder { difficulty, return_to_difficulty } => {
+            DifficultyRecommendation::ConfidenceBuilder {
+                difficulty,
+                return_to_difficulty,
+            } => {
                 assert!(difficulty < 5, "confidence builder should be easier");
                 assert_eq!(return_to_difficulty, 5);
             }
@@ -630,7 +639,10 @@ mod tests {
             scaffolded_level: 6,
         };
         let rec = recommend_next_difficulty(&state, false, Some(&zpd));
-        assert_eq!(rec, DifficultyRecommendation::Increase { new_difficulty: 5 });
+        assert_eq!(
+            rec,
+            DifficultyRecommendation::Increase { new_difficulty: 5 }
+        );
     }
 
     #[test]
@@ -643,7 +655,10 @@ mod tests {
             pre_frustration_difficulty: None,
         };
         let rec = recommend_next_difficulty(&state, false, None);
-        assert_eq!(rec, DifficultyRecommendation::Decrease { new_difficulty: 3 });
+        assert_eq!(
+            rec,
+            DifficultyRecommendation::Decrease { new_difficulty: 3 }
+        );
     }
 
     #[test]
